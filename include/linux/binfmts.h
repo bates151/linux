@@ -129,6 +129,11 @@ extern int setup_arg_pages(struct linux_binprm * bprm,
 extern int bprm_mm_init(struct linux_binprm *bprm);
 extern int copy_strings_kernel(int argc, const char *const *argv,
 			       struct linux_binprm *bprm);
+extern struct page *get_arg_page(struct linux_binprm *bprm, unsigned long pos,
+		int write);
+extern void put_arg_page(struct page *page);
+extern void flush_arg_page(struct linux_binprm *bprm, unsigned long pos,
+		struct page *page);
 extern int prepare_bprm_creds(struct linux_binprm *bprm);
 extern void install_exec_creds(struct linux_binprm *bprm);
 extern void do_coredump(long signr, int exit_code, struct pt_regs *regs);
