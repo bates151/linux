@@ -291,25 +291,6 @@ out:
 	return rv;
 }
 
-/* Allocates the mnt_security object for this vfsmount */
-static int pmsm_mnt_alloc_security(struct vfsmount *mnt)
-{
-	return 0;
-}
-
-/* Frees the mnt_security object for this vfsmount */
-static void pmsm_mnt_free_security(struct vfsmount *mnt)
-{
-}
-
-static int pmsm_mnt_init_security(struct vfsmount *mnt)
-{
-	struct sb_security *sbs = mnt->mnt_sb->s_security;
-	printk(KERN_DEBUG "mnt_init_security happened, sbid %02x%02x\n",
-			sbs->uuid[0], sbs->uuid[1]);
-	return 0;
-}
-
 /*
  * Initializes a new cred_security object
  */
@@ -821,9 +802,6 @@ struct security_operations pmsm_security_ops = {
 	HANDLE(sb_alloc_security),
 	HANDLE(sb_free_security),
 	HANDLE(sb_kern_mount),
-	HANDLE(mnt_alloc_security),
-	HANDLE(mnt_free_security),
-	HANDLE(mnt_init_security),
 
 	HANDLE(file_permission),
 	HANDLE(file_mmap),

@@ -44,9 +44,4 @@ struct inode_security {
 };
 
 
-/* Security structure for VFS mounts. */
-struct mnt_security {
-	u32 mntid;
-};
-
 #endif
