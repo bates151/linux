@@ -43,5 +43,10 @@ struct inode_security {
 	int is_new;
 };
 
+/* Security structure for IPC */
+struct ipc_security {
+	u32 ipcid;
+};
+
 
 #endif

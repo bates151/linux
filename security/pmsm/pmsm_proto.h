@@ -39,7 +39,8 @@ enum {
 	PROVMSG_SETATTR,
 	PROVMSG_LINK,
 	PROVMSG_UNLINK,
-	PROVMSG_MOUNT,
+	PROVMSG_MQSEND,
+	PROVMSG_MQRECV,
 
 	NUM_PROVMSG_TYPES
 };
@@ -121,10 +122,13 @@ struct provmsg_unlink {
 	unsigned int fname_len;
 	char fname[NAME_MAX];
 };
-struct provmsg_mount {
+struct provmsg_mqsend {
 	struct provmsg_hdr header;
-	struct sb_inode where;
-	unsigned char sb_uuid[16];
+	u32 ipcid;
+};
+struct provmsg_mqrecv {
+	struct provmsg_hdr header;
+	u32 ipcid;
 };
 
 

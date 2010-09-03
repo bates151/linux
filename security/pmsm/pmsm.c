@@ -48,6 +48,7 @@ MODULE_LICENSE("GPL");
 
 
 static atomic_t csid_current = ATOMIC_INIT(0);
+static atomic_t ipc_current = ATOMIC_INIT(0);
 
 #define BOOT_BUFFER_SIZE (1 << 10)
 static char *boot_buffer;
@@ -781,6 +782,64 @@ static int pmsm_inode_permission(struct inode *inode, int mask)
 
 
 /*
+ * Security alloc/free for individual messages in a message queue
+ */
+int pmsm_msg_msg_alloc_security(struct msg_msg *msg) {
+	struct ipc_security *ipcsec;
+
+	ipcsec = kzalloc(sizeof *ipcsec, GFP_KERNEL);
+	if (!ipcsec)
+		return -ENOMEM;
+	ipcsec->csid = atomic_add_return(1, &ipc_current);
+	msg->security = ipcsec;
+}
+
+void pmsm_msg_msg_free_security(struct msg_msg *msg) {
+	struct ipc_security *ipcsec = msg->security;
+
+	msg->security = NULL;
+	kfree(ipcsec);
+}
+
+int pmsm_msg_queue_msgsnd(struct msg_queue *msq, struct msg_msg *msg,
+		int msqflg) {
+	const struct cred_security *cursec = current_security();
+	const struct ipc_security *ipcsec = msg->security;
+	struct provmsgmq_send msg;
+
+	msg.header.msgtype = PROVMSG_MQSEND;
+	msg.header.cred_id = cursec->csid;
+	msg.ipcid = ipcsec->ipcid;
+
+	write_to_relay(&msg, offsetof(struct provmsg_mqsend, ipcid) +
+			sizeof msg.ipcid);
+	return 0;
+}
+
+int pmsm_msg_queue_msgrcv(struct msg_queue *msq, struct msg_msg *msg,
+		struct task_struct *target, long type, int mode) {
+	const struct cred_security *cursec = target->cred->security;
+	const struct ipc_security *ipcsec = msg->security;
+	struct provmsgmq_recv msg;
+
+	msg.header.msgtype = PROVMSG_MQRECV;
+	msg.header.cred_id = cursec->csid;
+	msg.ipcid = ipcsec->ipcid;
+
+	write_to_relay(&msg, offsetof(struct provmsg_mqrecv, ipcid) +
+			sizeof msg.ipcid);
+	return 0;
+}
+
+int pmsm_shm_alloc_security(struct shmid_kernel *shp);
+void pmsm_shm_free_security(struct shmid_kernel *shp);
+/* XXX there are permissions on shm, and we aren't logging changes */
+int pmsm_shm_shmat(struct shmid_kernel *shp, char __user *shmaddr, int shmflg);
+
+/* XXX figure out how/whether semaphores should be logged */
+
+
+/*
  * Initialization functions and structures
  */
 static void set_init_creds(void)
@@ -816,6 +875,11 @@ struct security_operations pmsm_security_ops = {
 	HANDLE(inode_unlink),
 	HANDLE(inode_rename),
 	HANDLE(inode_setattr),
+
+	HANDLE(msg_msg_alloc_security),
+	HANDLE(msg_msg_free_security),
+	HANDLE(msg_queue_msgsnd),
+	HANDLE(msg_queue_msgrcv),
 
 	HANDLE(cred_alloc_blank),
 	HANDLE(cred_free),
