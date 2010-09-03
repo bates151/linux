@@ -1,6 +1,6 @@
 config SECURITY_PMSM
 	bool "Provenance monitor security module"
-	depends on SECURITY && SECURITY_MOUNT
+	depends on SECURITY
 	default n
 	help
 	  This enables the provenance monitor security module (PM/SM).
