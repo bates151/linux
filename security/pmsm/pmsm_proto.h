@@ -124,11 +124,11 @@ struct provmsg_unlink {
 };
 struct provmsg_mqsend {
 	struct provmsg_hdr header;
-	uint32_t ipcid;
+	uint32_t mqid;
 };
 struct provmsg_mqrecv {
 	struct provmsg_hdr header;
-	uint32_t ipcid;
+	uint32_t mqid;
 };
 
 

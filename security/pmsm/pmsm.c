@@ -48,7 +48,7 @@ MODULE_LICENSE("GPL");
 
 
 static atomic_t csid_current = ATOMIC_INIT(0);
-static atomic_t ipc_current = ATOMIC_INIT(0);
+static atomic_t mqid_current = ATOMIC_INIT(0);
 
 #define BOOT_BUFFER_SIZE (1 << 10)
 static char *boot_buffer;
@@ -785,61 +785,52 @@ static int pmsm_inode_permission(struct inode *inode, int mask)
  * Security alloc/free for individual messages in a message queue
  */
 static int pmsm_msg_msg_alloc_security(struct msg_msg *msg) {
-	struct ipc_security *ipcsec;
+	struct mq_security *mqsec;
 
-	ipcsec = kzalloc(sizeof *ipcsec, GFP_KERNEL);
-	if (!ipcsec)
+	mqsec = kzalloc(sizeof *mqsec, GFP_KERNEL);
+	if (!mqsec)
 		return -ENOMEM;
-	ipcsec->ipcid = atomic_add_return(1, &ipc_current);
-	msg->security = ipcsec;
+	mqsec->mqid = atomic_add_return(1, &mqid_current);
+	msg->security = mqsec;
 	return 0;
 }
 
 static void pmsm_msg_msg_free_security(struct msg_msg *msg) {
-	struct ipc_security *ipcsec = msg->security;
+	struct mq_security *mqsec = msg->security;
 
 	msg->security = NULL;
-	kfree(ipcsec);
+	kfree(mqsec);
 }
 
 static int pmsm_msg_queue_msgsnd(struct msg_queue *msq, struct msg_msg *msg,
 		int msqflg) {
 	const struct cred_security *cursec = current_security();
-	const struct ipc_security *ipcsec = msg->security;
+	const struct mq_security *mqsec = msg->security;
 	struct provmsg_mqsend logmsg;
 
 	logmsg.header.msgtype = PROVMSG_MQSEND;
 	logmsg.header.cred_id = cursec->csid;
-	logmsg.ipcid = ipcsec->ipcid;
+	logmsg.mqid = mqsec->mqid;
 
-	write_to_relay(&logmsg, offsetof(struct provmsg_mqsend, ipcid) +
-			sizeof logmsg.ipcid);
+	write_to_relay(&logmsg, offsetof(struct provmsg_mqsend, mqid) +
+			sizeof logmsg.mqid);
 	return 0;
 }
 
 static int pmsm_msg_queue_msgrcv(struct msg_queue *msq, struct msg_msg *msg,
 		struct task_struct *target, long type, int mode) {
 	const struct cred_security *cursec = target->cred->security;
-	const struct ipc_security *ipcsec = msg->security;
+	const struct mq_security *mqsec = msg->security;
 	struct provmsg_mqrecv logmsg;
 
 	logmsg.header.msgtype = PROVMSG_MQRECV;
 	logmsg.header.cred_id = cursec->csid;
-	logmsg.ipcid = ipcsec->ipcid;
+	logmsg.mqid = mqsec->mqid;
 
-	write_to_relay(&logmsg, offsetof(struct provmsg_mqrecv, ipcid) +
-			sizeof logmsg.ipcid);
+	write_to_relay(&logmsg, offsetof(struct provmsg_mqrecv, mqid) +
+			sizeof logmsg.mqid);
 	return 0;
 }
-
-/* XXX there are permissions on shm, and we aren't logging changes */
-/*
-static int pmsm_shm_alloc_security(struct shmid_kernel *shp);
-static void pmsm_shm_free_security(struct shmid_kernel *shp);
-static int pmsm_shm_shmat(struct shmid_kernel *shp, char __user *shmaddr, int shmflg);
-*/
-
-/* XXX figure out how/whether semaphores should be logged */
 
 
 /*

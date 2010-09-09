@@ -43,9 +43,9 @@ struct inode_security {
 	int is_new;
 };
 
-/* Security structure for IPC */
-struct ipc_security {
-	u32 ipcid;
+/* Security structure for XSI message queues */
+struct mq_security {
+	u32 mqid;
 };
 
 
