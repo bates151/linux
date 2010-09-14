@@ -126,9 +126,10 @@ static void init_relay(void)
 
 
 /*
- * Function for grabbing the argv from a bprm
+ * Function for grabbing the argv and envp from a bprm
  */
-static int copy_strings_bprm(struct linux_binprm *bprm, char *dst)
+static int copy_strings_bprm(struct linux_binprm *bprm, char *dst,
+		unsigned int *argv_len)
 {
 	int rv = 0;
 	unsigned int count;
@@ -137,7 +138,7 @@ static int copy_strings_bprm(struct linux_binprm *bprm, char *dst)
 	const char *kaddr;
 	unsigned int ofs, remaining, bytes;
 
-	count = bprm->argc;
+	count = bprm->argc + bprm->envc;
 	src = bprm->p;
 	ofs = src % PAGE_SIZE;
 	remaining = PAGE_SIZE - src;
@@ -158,8 +159,12 @@ static int copy_strings_bprm(struct linux_binprm *bprm, char *dst)
 		 * when copying, and count the string.
 		 */
 		remaining -= bytes;
-		if (remaining)
-			++bytes, --remaining, --count;
+		if (remaining) {
+			++bytes, --remaining;
+			/* If we've hit the end of argv, record our position */
+			if (--count == bprm->envc)
+				*argv_len = src + bytes - bprm->p;
+		}
 		memcpy(dst, kaddr + ofs, bytes);
 		ofs += bytes;
 		src += bytes;
@@ -456,10 +461,10 @@ static int pmsm_bprm_check_security(struct linux_binprm *bprm)
 		printk(KERN_ERR "PM/SM: Failed to allocate exec message\n");
 		return -ENOMEM;
 	}
-	rv = bytes = copy_strings_bprm(bprm, msg->argv_envp);
+	rv = bytes = copy_strings_bprm(bprm, msg->argv_envp, &msg->argv_len);
 	if (bytes < 0)
 		goto out;
-	msg->argv_envp_len = bytes;
+	msg->envp_len = bytes - msg->argv_len;
 	msg->header.msgtype = PROVMSG_EXEC;
 	msg->header.cred_id = newsec->csid;
 
