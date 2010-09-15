@@ -45,7 +45,7 @@ struct inode_security {
 
 /* Security structure for XSI message queues */
 struct mq_security {
-	u32 mqid;
+	u32 msgid;
 };
 
 

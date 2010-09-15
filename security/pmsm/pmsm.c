@@ -48,7 +48,7 @@ MODULE_LICENSE("GPL");
 
 
 static atomic_t csid_current = ATOMIC_INIT(0);
-static atomic_t mqid_current = ATOMIC_INIT(0);
+static atomic_t msgid_current = ATOMIC_INIT(0);
 
 #define BOOT_BUFFER_SIZE (1 << 10)
 static char *boot_buffer;
@@ -795,7 +795,7 @@ static int pmsm_msg_msg_alloc_security(struct msg_msg *msg) {
 	mqsec = kzalloc(sizeof *mqsec, GFP_KERNEL);
 	if (!mqsec)
 		return -ENOMEM;
-	mqsec->mqid = atomic_add_return(1, &mqid_current);
+	mqsec->msgid = atomic_add_return(1, &msgid_current);
 	msg->security = mqsec;
 	return 0;
 }
@@ -815,10 +815,10 @@ static int pmsm_msg_queue_msgsnd(struct msg_queue *msq, struct msg_msg *msg,
 
 	logmsg.header.msgtype = PROVMSG_MQSEND;
 	logmsg.header.cred_id = cursec->csid;
-	logmsg.mqid = mqsec->mqid;
+	logmsg.msgid = mqsec->msgid;
 
-	write_to_relay(&logmsg, offsetof(struct provmsg_mqsend, mqid) +
-			sizeof logmsg.mqid);
+	write_to_relay(&logmsg, offsetof(struct provmsg_mqsend, msgid) +
+			sizeof logmsg.msgid);
 	return 0;
 }
 
@@ -830,10 +830,10 @@ static int pmsm_msg_queue_msgrcv(struct msg_queue *msq, struct msg_msg *msg,
 
 	logmsg.header.msgtype = PROVMSG_MQRECV;
 	logmsg.header.cred_id = cursec->csid;
-	logmsg.mqid = mqsec->mqid;
+	logmsg.msgid = mqsec->msgid;
 
-	write_to_relay(&logmsg, offsetof(struct provmsg_mqrecv, mqid) +
-			sizeof logmsg.mqid);
+	write_to_relay(&logmsg, offsetof(struct provmsg_mqrecv, msgid) +
+			sizeof logmsg.msgid);
 	return 0;
 }
 
