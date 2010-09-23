@@ -45,8 +45,7 @@ MODULE_AUTHOR("Devin J. Pohly");
 MODULE_LICENSE("GPL");
 
 
-static atomic_t csid_current = ATOMIC_INIT(0);
-static atomic_t msgid_current = ATOMIC_INIT(0);
+static atomic_t provid_current = ATOMIC_INIT(0);
 
 #define BOOT_BUFFER_SIZE (1 << 10)
 static char *boot_buffer;
@@ -296,12 +295,20 @@ out:
 }
 
 /*
+ * Returns the first available identifier
+ */
+static int get_next_provid(void)
+{
+	return atomic_add_return(1, &provid_current);
+}
+
+/*
  * Initializes a new cred_security object
  */
 static int cred_security_init(struct cred_security *csec,
 		const struct cred_security *old)
 {
-	csec->csid = atomic_add_return(1, &csid_current);
+	csec->csid = get_next_provid();
 	csec->exempt = old ? old->exempt : 0;
 	return 0;
 }
@@ -788,32 +795,32 @@ static int pmsm_inode_permission(struct inode *inode, int mask)
  * Security alloc/free for individual messages in a message queue
  */
 static int pmsm_msg_msg_alloc_security(struct msg_msg *msg) {
-	struct mq_security *mqsec;
+	struct msg_security *msgsec;
 
-	mqsec = kzalloc(sizeof *mqsec, GFP_KERNEL);
-	if (!mqsec)
+	msgsec = kzalloc(sizeof *msgsec, GFP_KERNEL);
+	if (!msgsec)
 		return -ENOMEM;
-	mqsec->msgid = atomic_add_return(1, &msgid_current);
-	msg->security = mqsec;
+	msgsec->msgid = get_next_provid();
+	msg->security = msgsec;
 	return 0;
 }
 
 static void pmsm_msg_msg_free_security(struct msg_msg *msg) {
-	struct mq_security *mqsec = msg->security;
+	struct msg_security *msgsec = msg->security;
 
 	msg->security = NULL;
-	kfree(mqsec);
+	kfree(msgsec);
 }
 
 static int pmsm_msg_queue_msgsnd(struct msg_queue *msq, struct msg_msg *msg,
 		int msqflg) {
 	const struct cred_security *cursec = current_security();
-	const struct mq_security *mqsec = msg->security;
+	const struct msg_security *msgsec = msg->security;
 	struct provmsg_mqsend logmsg;
 
 	logmsg.header.msgtype = PROVMSG_MQSEND;
 	logmsg.header.cred_id = cursec->csid;
-	logmsg.msgid = mqsec->msgid;
+	logmsg.msgid = msgsec->msgid;
 
 	write_to_relay(&logmsg, offsetof(struct provmsg_mqsend, msgid) +
 			sizeof logmsg.msgid);
@@ -823,12 +830,12 @@ static int pmsm_msg_queue_msgsnd(struct msg_queue *msq, struct msg_msg *msg,
 static int pmsm_msg_queue_msgrcv(struct msg_queue *msq, struct msg_msg *msg,
 		struct task_struct *target, long type, int mode) {
 	const struct cred_security *cursec = target->cred->security;
-	const struct mq_security *mqsec = msg->security;
+	const struct msg_security *msgsec = msg->security;
 	struct provmsg_mqrecv logmsg;
 
 	logmsg.header.msgtype = PROVMSG_MQRECV;
 	logmsg.header.cred_id = cursec->csid;
-	logmsg.msgid = mqsec->msgid;
+	logmsg.msgid = msgsec->msgid;
 
 	write_to_relay(&logmsg, offsetof(struct provmsg_mqrecv, msgid) +
 			sizeof logmsg.msgid);
