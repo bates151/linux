@@ -17,8 +17,7 @@
 #include <linux/kmod.h>
 
 #include <linux/highmem.h>
-#include <asm/uaccess.h>
-#include <asm/cacheflush.h>
+#include <linux/uaccess.h>
 
 #include <linux/stddef.h>
 #include <linux/limits.h>
@@ -37,7 +36,6 @@
 #include <linux/debugfs.h>
 #include <linux/relay.h>
 #include <linux/spinlock.h>
-#include <asm/spinlock.h>
 
 #include "pmsm.h"
 #include "pmsm_proto.h"
