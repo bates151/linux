@@ -44,8 +44,17 @@
 MODULE_AUTHOR("Devin J. Pohly");
 MODULE_LICENSE("GPL");
 
-
-static atomic_t provid_current = ATOMIC_INIT(0);
+#define BITS_PER_PAGE (PAGE_SIZE*8)
+#define BITS_PER_PAGE_MASK (BITS_PER_PAGE-1)
+#define PROVID_MAP_PAGES 4
+#define NUM_PROVIDS (PROVID_MAP_PAGES * BITS_PER_PAGE)
+static atomic_t provid_free[PROVID_MAP_PAGES] = {
+	[0 ... PROVID_MAP_PAGES-1] = ATOMIC_INIT(BITS_PER_PAGE)
+};
+static void *provid_page[PROVID_MAP_PAGES] = {
+	[0 ... PROVID_MAP_PAGES-1] = NULL
+};
+static int provid_last = -1;
 
 #define BOOT_BUFFER_SIZE (1 << 10)
 static char *boot_buffer;
@@ -98,12 +107,12 @@ static void write_to_relay(const void *data, size_t length)
 /* Initial message */
 static const struct provmsg_boot init_bootmsg = {
 	.header.msgtype = PROVMSG_BOOT,
-	.header.cred_id = 1,
+	.header.cred_id = 0,
 	.version = PMSM_PROTO_VERSION,
 };
 static const struct provmsg_setid init_setidmsg = {
 	.header.msgtype = PROVMSG_SETID,
-	.header.cred_id = 1,
+	.header.cred_id = 0,
 	/* Static, so all IDs are 0 */
 };
 
@@ -295,11 +304,76 @@ out:
 }
 
 /*
- * Returns the first available identifier
+ * Sets up the identifier map
  */
-static int get_next_provid(void)
+static int init_provid_map(void)
 {
-	return atomic_add_return(1, &provid_current);
+	int i;
+	void *page;
+
+	for (i = 0; i < PROVID_MAP_PAGES; i++) {
+		page = kzalloc(PAGE_SIZE, GFP_KERNEL);
+		if (unlikely(!page)) {
+			while (--i >= 0)
+				kfree(provid_page[i]);
+			return -ENOMEM;
+		}
+		provid_page[i] = page;
+	}
+	return 0;
+}
+
+/*
+ * Returns the next available identifier.  Adapted from alloc_pidmap in
+ * kernel/pid.c.
+ */
+static int alloc_provid(void)
+{
+	int i, offset, page, max_scan, id, last = provid_last;
+
+	id = last + 1;
+	if (id >= NUM_PROVIDS)
+		id = 0;
+	offset = id & BITS_PER_PAGE_MASK;
+	page = id / BITS_PER_PAGE;
+	max_scan = PROVID_MAP_PAGES - !offset;
+
+	for (i = 0; i <= max_scan; i++) {
+		if (likely(atomic_read(&provid_free[page]))) {
+			do {
+				if (!test_and_set_bit(offset,
+							provid_page[page])) {
+					atomic_dec(&provid_free[page]);
+					provid_last = id;
+					return id;
+				}
+				offset = find_next_zero_bit(provid_page[page],
+						BITS_PER_PAGE, offset);
+				id = page * BITS_PER_PAGE + offset;
+			} while (offset < BITS_PER_PAGE && id < NUM_PROVIDS &&
+					(i != max_scan || id < last ||
+					 !((last+1) & BITS_PER_PAGE_MASK)));
+		}
+		if (page < PROVID_MAP_PAGES)
+			page++;
+		else
+			page = 0;
+		offset = 0;
+		id = page * BITS_PER_PAGE;
+	}
+	return -ENOMEM;
+}
+
+/*
+ * Frees a provenance identifier.  Adapted from free_pidmap in kernel/pid.c.
+ */
+static void free_provid(int id) {
+	int offset, page;
+	offset = id & BITS_PER_PAGE_MASK;
+	page = id / BITS_PER_PAGE;
+
+	clear_bit(offset, provid_page[page]);
+	atomic_inc(&provid_free[page]);
 }
 
 /*
@@ -308,7 +382,7 @@ static int get_next_provid(void)
 static int cred_security_init(struct cred_security *csec,
 		const struct cred_security *old)
 {
-	csec->csid = get_next_provid();
+	csec->csid = alloc_provid();
 	csec->exempt = old ? old->exempt : 0;
 	return 0;
 }
@@ -323,6 +397,7 @@ static void cred_security_destroy(struct cred_security *csec)
 	struct provmsg_credfree buf;
 
 	kfree(csec);
+	free_provid(id);
 
 	if (exempt)
 		return;
@@ -800,16 +875,18 @@ static int pmsm_msg_msg_alloc_security(struct msg_msg *msg) {
 	msgsec = kzalloc(sizeof *msgsec, GFP_KERNEL);
 	if (!msgsec)
 		return -ENOMEM;
-	msgsec->msgid = get_next_provid();
+	msgsec->msgid = alloc_provid();
 	msg->security = msgsec;
 	return 0;
 }
 
 static void pmsm_msg_msg_free_security(struct msg_msg *msg) {
 	struct msg_security *msgsec = msg->security;
+	int id = msgsec->msgid;
 
 	msg->security = NULL;
 	kfree(msgsec);
+	free_provid(id);
 }
 
 static int pmsm_msg_queue_msgsnd(struct msg_queue *msq, struct msg_msg *msg,
@@ -896,6 +973,8 @@ struct security_operations pmsm_security_ops = {
 
 static int __init pmsm_init(void)
 {
+	int rv = 0;
+
 	if (!security_module_enable(&pmsm_security_ops)) {
 		printk(KERN_ERR "PM/SM: ERROR - failed to enable module\n");
 		return -EINVAL;
@@ -903,6 +982,9 @@ static int __init pmsm_init(void)
 	printk(KERN_INFO "PM/SM: module enabled\n");
 
 	boot_buffer = kmalloc(BOOT_BUFFER_SIZE, GFP_KERNEL);
+	rv = init_provid_map();
+	if (rv)
+		return rv;
 	set_init_creds();
 
 	/* Finally register */
