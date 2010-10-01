@@ -266,8 +266,8 @@ static int pmsm_sb_kern_mount(struct super_block *sb, int flags, void *data)
 		 * XXX Treats filesystems with no xattr support as new every
 		 * time - provenance continuity is lost here!
 		 */
-		printk(KERN_WARNING "sb_kern_mount: no xattr support "
-		                            "for %s\n", sb->s_type->name);
+		printk(KERN_WARNING "PM/SM: no xattr support for "
+		                            "%s\n", sb->s_type->name);
 		generate_random_uuid(sbs->uuid);
 		goto out;
 	}
@@ -279,20 +279,22 @@ static int pmsm_sb_kern_mount(struct super_block *sb, int flags, void *data)
 		rv = 0;
 	} else if (rv >= 0 || rv == -ENODATA) {
 		/* Only mount filesystems that are correctly labeled */
-		printk(KERN_ERR "sb_kern_mount: missing or malformed "
-				"UUID label on root!\n");
+		printk(KERN_ERR "PM/SM: Missing or malformed UUID label "
+				"on filesystem.  If this is\n");
+		printk(KERN_ERR "       your root filesystem, kernel may "
+				"panic or drop to initrd.\n");
 		rv = -EPERM;
 	} else if (rv == -EOPNOTSUPP) {
 		/*
 		 * Treat as a never-encountered filesystem (apropos for tmpfs,
 		 * which throws this error, but XXX not nfs4 which also does)
 		 */
-		printk(KERN_WARNING "sb_kern_mount: unsupported dev=%s "
+		printk(KERN_WARNING "PM/SM: getxattr unsupported dev=%s "
 				"type=%s\n", sb->s_id, sb->s_type->name);
 		generate_random_uuid(sbs->uuid);
 		rv = 0;
 	} else {
-		printk(KERN_ERR "sb_kern_mount: getxattr dev=%s type=%s "
+		printk(KERN_ERR "PM/SM: getxattr dev=%s type=%s "
 				"err=%d\n", sb->s_id, sb->s_type->name, -rv);
 		/* rv from getxattr falls through */
 	}
