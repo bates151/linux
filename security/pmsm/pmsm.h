@@ -17,14 +17,17 @@
 
 
 /*
- * Security label for struct cred.  The 32-bit ID is just an incremental number
- * which, for a proof-of-concept implementation, should do enough to avoid
- * collisions.  This ought to be implemented later in a similar fashion to PID
- * numbering (bit array?).
+ * Security label for struct cred.  Exempt processes are "opaque" in that any
+ * credentials they fork are considered part of the original process, so we use
+ * a reference counter to make sure these are freed at the appropriate time and
+ * no earlier.
  */
 struct cred_security {
+	struct kref refcount;
 	u32 csid;
-	int exempt;
+	int flags;
+#define CSEC_INITED (1 << 0)
+#define CSEC_EXEMPT (1 << 1)
 };
 
 

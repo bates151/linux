@@ -363,7 +363,7 @@ static int alloc_provid(void)
 		offset = 0;
 		id = page * BITS_PER_PAGE;
 	}
-	return -ENOMEM;
+	return -1;
 }
 
 /*
@@ -384,43 +384,35 @@ static void free_provid(int id) {
 static int cred_security_init(struct cred_security *csec,
 		const struct cred_security *old)
 {
-	csec->csid = alloc_provid();
-	csec->exempt = old ? old->exempt : 0;
+	struct provmsg_credfork buf;
+	csec->flags = CSEC_INITED;
+
+	buf.header.msgtype = PROVMSG_CREDFORK;
+	buf.header.cred_id = old->csid;
+	buf.forked_cred = csec->csid;
+	write_to_relay(&buf, sizeof buf);
 	return 0;
 }
 
 /*
  * Destroys a cred_security object (called once its refcount falls to zero)
  */
-static void cred_security_destroy(struct cred_security *csec)
+static void cred_security_destroy(struct kref *ref)
 {
+	struct cred_security *csec = container_of(ref, struct cred_security,
+			refcount);
 	int id = csec->csid;
-	int exempt = csec->exempt;
+	int inited = csec->flags & CSEC_INITED;
 	struct provmsg_credfree buf;
 
 	kfree(csec);
 	free_provid(id);
 
-	if (exempt)
+	if (!inited)
 		return;
 	buf.header.msgtype = PROVMSG_CREDFREE;
 	buf.header.cred_id = id;
 	write_to_relay(&buf, sizeof buf);
-}
-
-/*
- * Allocate the security part of a blank set of credentials
- */
-static int pmsm_cred_alloc_blank(struct cred *cred, gfp_t gfp)
-{
-	struct cred_security *csec;
-
-	csec = kmalloc(sizeof(*csec), gfp);
-	if (!csec)
-		return -ENOMEM;
-
-	cred->security = csec;
-	return 0;
 }
 
 /*
@@ -431,7 +423,7 @@ static void pmsm_cred_free(struct cred *cred)
 	struct cred_security *csec = cred->security;
 
 	cred->security = NULL;
-	cred_security_destroy(csec);
+	kref_put(&csec->refcount, cred_security_destroy);
 }
 
 /*
@@ -440,46 +432,81 @@ static void pmsm_cred_free(struct cred *cred)
 static int pmsm_cred_prepare(struct cred *new, const struct cred *old,
                              gfp_t gfp)
 {
-	const struct cred_security *old_csec;
+	struct cred_security *old_csec = old->security;
 	struct cred_security *csec;
-	struct provmsg_credfork buf;
-	int rv;
+	int rv, id;
 
+	if (unlikely(old_csec->flags & CSEC_EXEMPT)) {
+		kref_get(&old_csec->refcount);
+		new->security = old_csec;
+		return 0;
+	}
 	csec = kmalloc(sizeof(*csec), gfp);
 	if (!csec)
 		return -ENOMEM;
 
-	old_csec = old->security;
+	rv = -ENOMEM;
+	id = alloc_provid();
+	if (id < 0)
+		goto out_free;
+	csec->csid = id;
+	kref_init(&csec->refcount);
 	rv = cred_security_init(csec, old_csec);
 	if (rv)
-		goto out_free;
+		goto out_free_id;
+
 	new->security = csec;
-
-	if (csec->exempt)
-		return 0;
-
-	buf.header.msgtype = PROVMSG_CREDFORK;
-	buf.header.cred_id = old_csec->csid;
-	buf.forked_cred = csec->csid;
-	write_to_relay(&buf, sizeof buf);
-
 	return 0;
 
+out_free_id:
+	free_provid(id);
 out_free:
 	kfree(csec);
 	return rv;
 }
 
 /*
+ * Allocate the security part of a blank set of credentials - used only with
+ * cred_transfer in the context of keys
+ */
+static int pmsm_cred_alloc_blank(struct cred *cred, gfp_t gfp)
+{
+	struct cred_security *csec;
+	int id;
+
+	csec = kzalloc(sizeof(*csec), gfp);
+	if (!csec)
+		return -ENOMEM;
+
+	id = alloc_provid();
+	if (id < 0)
+		return -ENOMEM;
+	csec->csid = id;
+	kref_init(&csec->refcount);
+	/* i.e. not inited */
+	csec->flags = 0;
+
+	cred->security = csec;
+	return 0;
+}
+
+/*
  * Copies an existing set of credentials into an already-allocated blank
- * set of credentials.
+ * set of credentials - used only with cred_alloc_blank in the context of keys
  */
 static void pmsm_cred_transfer(struct cred *new, const struct cred *old)
 {
-	const struct cred_security *old_csec = old->security;
+	struct cred_security *old_csec = old->security;
 	struct cred_security *csec = new->security;
 
-	*csec = *old_csec;
+	if (unlikely(old_csec->flags & CSEC_EXEMPT)) {
+		free_provid(csec->csid);
+		kfree(csec);
+		kref_get(&old_csec->refcount);
+		new->security = old_csec;
+	} else {
+		cred_security_init(csec, old_csec);
+	}
 	return;
 }
 
@@ -492,7 +519,7 @@ static int pmsm_task_fix_setuid(struct cred *new, const struct cred *old,
 	const struct cred_security *csec = new->security;
 	struct provmsg_setid buf;
 
-	if (csec->exempt)
+	if (csec->flags & CSEC_EXEMPT)
 		return cap_task_fix_setuid(new, old, flags);
 
 	csec = new->security;
@@ -526,16 +553,18 @@ static int pmsm_bprm_check_security(struct linux_binprm *bprm)
 	unsigned int bytes;
 	char xattr[7];
 
-	/* Allow exempt programs to exec others exempt */
-	newsec->exempt = cursec->exempt;
-	if (!newsec->exempt && bprm->file && bprm->file->f_dentry &&
-			bprm->file->f_dentry->d_inode &&
-			bprm->file->f_dentry->d_inode->i_op->getxattr) {
+	/* Don't worry about the internal forkings etc. of exempt programs */
+	if (cursec->flags & CSEC_EXEMPT)
+		return 0;
+
+	/* Examination of exec.c:open_exec() shows that nothing in this
+	 * expression can be NULL */
+	if (bprm->file->f_dentry->d_inode->i_op->getxattr) {
 		rv = bprm->file->f_dentry->d_inode->i_op->getxattr(
 				bprm->file->f_dentry,
 				XATTR_NAME_PMSM, xattr, 7);
 		if (rv >= 0 && !strncmp(xattr, "exempt", 6))
-			newsec->exempt = 1;
+			newsec->flags |= CSEC_EXEMPT;
 	}
 
 	msg = kmalloc(sizeof (*msg), GFP_KERNEL);
@@ -778,7 +807,7 @@ static int pmsm_file_permission(struct file *file, int mask)
 	const struct sb_security *sbs;
 	struct provmsg_file_p msg;
 
-	if (cursec->exempt)
+	if (cursec->flags & CSEC_EXEMPT)
 		return 0;
 
 	msg.header.msgtype = PROVMSG_FILE_P;
@@ -814,7 +843,7 @@ static int pmsm_file_mmap(struct file *file, unsigned long reqprot,
 	const struct sb_security *sbs;
 	struct provmsg_mmap msg;
 
-	if (cursec->exempt)
+	if (cursec->flags & CSEC_EXEMPT)
 		return 0;
 
 	msg.header.msgtype = PROVMSG_MMAP;
@@ -846,7 +875,7 @@ static int pmsm_inode_permission(struct inode *inode, int mask)
 	const struct sb_security *sbs;
 	struct provmsg_inode_p msg;
 
-	if (cursec->exempt)
+	if (cursec->flags & CSEC_EXEMPT)
 		return 0;
 
 	msg.header.msgtype = PROVMSG_INODE_P;
@@ -925,16 +954,29 @@ static int pmsm_msg_queue_msgrcv(struct msg_queue *msq, struct msg_msg *msg,
 /*
  * Initialization functions and structures
  */
-static void set_init_creds(void)
+static int set_init_creds(void)
 {
 	struct cred *cred = (struct cred *) current->real_cred;
 	struct cred_security *csec;
+	int id;
 
 	csec = kzalloc(sizeof *csec, GFP_KERNEL);
 	if (!csec)
-		panic("PM/SM: Failed to allocate creds for initial task.");
-	cred_security_init(csec, NULL);
+		return -ENOMEM;
+
+	id = alloc_provid();
+	if (id < 0)
+		goto out_nomem;
+	csec->csid = id;
+	kref_init(&csec->refcount);
+	csec->flags = CSEC_INITED;
+
 	cred->security = csec;
+	return 0;
+
+out_nomem:
+	kfree(csec);
+	return -ENOMEM;
 }
 
 struct security_operations pmsm_security_ops = {
@@ -987,7 +1029,8 @@ static int __init pmsm_init(void)
 	rv = init_provid_map();
 	if (rv)
 		return rv;
-	set_init_creds();
+	if (set_init_creds())
+		panic("PM/SM: Failed to allocate creds for initial task.");
 
 	/* Finally register */
 	if (register_security(&pmsm_security_ops))
