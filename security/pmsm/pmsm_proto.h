@@ -20,7 +20,7 @@
 /* Structure referring to an inode on a specific superblock */
 struct sb_inode {
 	unsigned char sb_uuid[16];
-	ino_t ino;
+	uint64_t ino;
 };
 
 
@@ -63,37 +63,37 @@ struct provmsg_credfree {
 };
 struct provmsg_setid {
 	struct provmsg_hdr header;
-	uid_t uid;
-	gid_t gid;
-	uid_t suid;
-	gid_t sgid;
-	uid_t euid;
-	gid_t egid;
-	uid_t fsuid;
-	gid_t fsgid;
+	uint32_t uid;
+	uint32_t gid;
+	uint32_t suid;
+	uint32_t sgid;
+	uint32_t euid;
+	uint32_t egid;
+	uint32_t fsuid;
+	uint32_t fsgid;
 };
 struct provmsg_exec {
 	struct provmsg_hdr header;
 	struct sb_inode inode;
-	unsigned int argv_len;
-	unsigned int envp_len;
+	uint32_t argv_len;
+	uint32_t envp_len;
 	char argv_envp[ARG_MAX];
 };
 struct provmsg_file_p {
 	struct provmsg_hdr header;
 	struct sb_inode inode;
-	int mask;
+	int32_t mask;
 };
 struct provmsg_mmap {
 	struct provmsg_hdr header;
 	struct sb_inode inode;
-	unsigned long prot;
-	unsigned long flags;
+	uint64_t prot;
+	uint64_t flags;
 };
 struct provmsg_inode_p {
 	struct provmsg_hdr header;
 	struct sb_inode inode;
-	int mask;
+	int32_t mask;
 };
 struct provmsg_inode_alloc {
 	struct provmsg_hdr header;
@@ -107,20 +107,20 @@ struct provmsg_setattr {
 	struct provmsg_hdr header;
 	struct sb_inode inode;
 	uint16_t mode;
-	uid_t uid;
-	gid_t gid;
+	uint32_t uid;
+	uint32_t gid;
 };
 struct provmsg_link {
 	struct provmsg_hdr header;
 	struct sb_inode inode;
-	ino_t dir;
-	unsigned int fname_len;
+	uint64_t dir;
+	uint32_t fname_len;
 	char fname[NAME_MAX];
 };
 struct provmsg_unlink {
 	struct provmsg_hdr header;
 	struct sb_inode dir;
-	unsigned int fname_len;
+	uint32_t fname_len;
 	char fname[NAME_MAX];
 };
 struct provmsg_mqsend {
