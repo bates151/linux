@@ -2,7 +2,7 @@
 #define _SECURITY_PMSM_PROTO_H
 
 
-#define PMSM_PROTO_VERSION 3
+#define PMSM_PROTO_VERSION 4
 
 #define PROVD_PORT 16152
 #define PROVD_PORT_STR "16152"
@@ -106,9 +106,9 @@ struct provmsg_inode_dealloc {
 struct provmsg_setattr {
 	struct provmsg_hdr header;
 	struct sb_inode inode;
-	uint16_t mode;
 	uint32_t uid;
 	uint32_t gid;
+	uint16_t mode;
 };
 struct provmsg_link {
 	struct provmsg_hdr header;

@@ -653,16 +653,17 @@ static void pmsm_d_instantiate(struct dentry *dentry, struct inode *inode)
 	memcpy(&attrmsg.inode, &allocmsg.inode, sizeof attrmsg.inode);
 	memcpy(&linkmsg.inode, &allocmsg.inode, sizeof linkmsg.inode);
 
-	attrmsg.mode = inode->i_mode;
 	attrmsg.uid = inode->i_uid;
 	attrmsg.gid = inode->i_gid;
+	attrmsg.mode = inode->i_mode;
 
 	linkmsg.dir = dentry->d_parent->d_inode->i_ino;
 	linkmsg.fname_len = dentry->d_name.len;
 	memcpy(linkmsg.fname, dentry->d_name.name, linkmsg.fname_len);
 
 	write_to_relay(&allocmsg, sizeof allocmsg);
-	write_to_relay(&attrmsg, sizeof attrmsg);
+	write_to_relay(&attrmsg, offsetof(struct provmsg_setattr, mode) +
+			sizeof attrmsg.mode);
 	write_to_relay(&linkmsg, offsetof(struct provmsg_link, fname) +
 			linkmsg.fname_len);
 }
@@ -788,11 +789,12 @@ int pmsm_inode_setattr(struct dentry *dentry, struct iattr *attr)
 
 	i = dentry->d_inode;
 	msg.inode.ino = i->i_ino;
-	msg.mode = (attr->ia_valid & ATTR_MODE) ? attr->ia_mode : i->i_mode;
 	msg.uid = (attr->ia_valid & ATTR_UID) ? attr->ia_uid : i->i_uid;
 	msg.gid = (attr->ia_valid & ATTR_GID) ? attr->ia_gid : i->i_gid;
+	msg.mode = (attr->ia_valid & ATTR_MODE) ? attr->ia_mode : i->i_mode;
 
-	write_to_relay(&msg, sizeof msg);
+	write_to_relay(&msg, offsetof(struct provmsg_setattr, mode) +
+			sizeof msg.mode);
 
 	return 0;
 }
