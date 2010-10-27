@@ -147,7 +147,7 @@ static int copy_strings_bprm(struct linux_binprm *bprm, char *dst,
 	count = bprm->argc + bprm->envc;
 	src = bprm->p;
 	ofs = src % PAGE_SIZE;
-	remaining = PAGE_SIZE - src;
+	remaining = PAGE_SIZE - ofs;
 
 	/* Pin and map page */
 	page = get_arg_page(bprm, src, 0);
