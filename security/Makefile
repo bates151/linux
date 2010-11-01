@@ -3,7 +3,6 @@
 #
 
 obj-$(CONFIG_KEYS)			+= keys/
-obj-$(CONFIG_SECURITY_LOGLSM)		+= loglsm.o
 subdir-$(CONFIG_SECURITY_PMSM)		+= pmsm
 subdir-$(CONFIG_SECURITY_SELINUX)	+= selinux
 subdir-$(CONFIG_SECURITY_SMACK)		+= smack
