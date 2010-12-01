@@ -2,7 +2,7 @@
 #define _SECURITY_PMSM_PROTO_H
 
 
-#define PMSM_PROTO_VERSION 4
+#define PMSM_PROTO_VERSION 5
 
 #define PROVD_PORT 16152
 #define PROVD_PORT_STR "16152"
@@ -75,9 +75,10 @@ struct provmsg_setid {
 struct provmsg_exec {
 	struct provmsg_hdr header;
 	struct sb_inode inode;
-	uint32_t argv_len;
-	uint32_t envp_len;
-	char argv_envp[ARG_MAX];
+	uint32_t argc;
+	uint32_t argv_envp_len;
+	/* Variable-length string */
+	char argv_envp[0];
 };
 struct provmsg_file_p {
 	struct provmsg_hdr header;
@@ -115,13 +116,15 @@ struct provmsg_link {
 	struct sb_inode inode;
 	uint64_t dir;
 	uint32_t fname_len;
-	char fname[NAME_MAX];
+	/* Variable-length string */
+	char fname[0];
 };
 struct provmsg_unlink {
 	struct provmsg_hdr header;
 	struct sb_inode dir;
 	uint32_t fname_len;
-	char fname[NAME_MAX];
+	/* Variable-length string */
+	char fname[0];
 };
 struct provmsg_mqsend {
 	struct provmsg_hdr header;

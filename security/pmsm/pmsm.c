@@ -134,20 +134,17 @@ static void init_relay(void)
 /*
  * Function for grabbing the argv and envp from a bprm
  */
-static int copy_strings_bprm(struct linux_binprm *bprm, char *dst,
-		unsigned int *argv_len)
+static int copy_bytes_bprm(struct linux_binprm *bprm, char *dst,
+		unsigned int count)
 {
 	int rv = 0;
-	unsigned int count;
 	unsigned long src;
 	struct page *page, *new_page;
 	const char *kaddr;
-	unsigned int ofs, remaining, bytes;
+	unsigned int ofs, bytes;
 
-	count = bprm->argc + bprm->envc;
 	src = bprm->p;
 	ofs = src % PAGE_SIZE;
-	remaining = PAGE_SIZE - ofs;
 
 	/* Pin and map page */
 	page = get_arg_page(bprm, src, 0);
@@ -156,45 +153,36 @@ static int copy_strings_bprm(struct linux_binprm *bprm, char *dst,
 		goto out;
 	}
 	kaddr = kmap(page);
-	flush_arg_page(bprm, src & PAGE_MASK, page);
+	flush_arg_page(bprm, src, page);
+
+	bytes = min_t(unsigned int, count, PAGE_SIZE - ofs);
+	memcpy(dst, kaddr + ofs, bytes);
+	src += bytes;
+	dst += bytes;
+	count -= bytes;
 
 	while (count) {
-		bytes = strnlen(kaddr + ofs, remaining);
-		/*
-		 * If entire string was on this page, include null-terminator
-		 * when copying, and count the string.
-		 */
-		remaining -= bytes;
-		if (remaining) {
-			++bytes, --remaining;
-			/* If we've hit the end of argv, record our position */
-			if (--count == bprm->envc)
-				*argv_len = src + bytes - bprm->p;
+		/* Map new page if there's more to come */
+		new_page = get_arg_page(bprm, src, 0);
+		if (!new_page) {
+			rv = -E2BIG;
+			goto out_unmap;
 		}
-		memcpy(dst, kaddr + ofs, bytes);
-		ofs += bytes;
+
+		/* Unmap and unpin old page */
+		flush_kernel_dcache_page(page);
+		kunmap(page);
+		put_arg_page(page);
+
+		page = new_page;
+		kaddr = kmap(page);
+		flush_arg_page(bprm, src, page);
+
+		bytes = min_t(unsigned int, count, PAGE_SIZE);
+		memcpy(dst, kaddr, bytes);
 		src += bytes;
 		dst += bytes;
-		/* Map new page if this one is finished */
-		if (!remaining) {
-			new_page = get_arg_page(bprm, src, 0);
-			if (!new_page) {
-				rv = -E2BIG;
-				goto out_unmap;
-			}
-
-			/* Unmap and unpin old page */
-			flush_kernel_dcache_page(page);
-			kunmap(page);
-			put_arg_page(page);
-
-			page = new_page;
-			kaddr = kmap(page);
-			flush_arg_page(bprm, src & PAGE_MASK, page);
-
-			ofs = 0;
-			remaining = PAGE_SIZE;
-		}
+		count -= bytes;
 	}
 
 	/* Success: return number of bytes copied */
@@ -567,27 +555,25 @@ static int pmsm_bprm_check_security(struct linux_binprm *bprm)
 			newsec->flags |= CSEC_EXEMPT;
 	}
 
-	msg = kmalloc(sizeof (*msg), GFP_KERNEL);
+	bytes = bprm->exec - bprm->p;
+	msg = kmalloc(offsetof(struct provmsg_exec, argv_envp) + bytes,
+			GFP_KERNEL);
 	if (!msg) {
 		printk(KERN_ERR "PM/SM: Failed to allocate exec message\n");
 		return -ENOMEM;
 	}
-	rv = bytes = copy_strings_bprm(bprm, msg->argv_envp, &msg->argv_len);
-	if (bytes < 0)
+	rv = copy_bytes_bprm(bprm, msg->argv_envp, bytes);
+	if (rv < 0)
 		goto out;
-	msg->envp_len = bytes - msg->argv_len;
+	msg->argc = bprm->argc;
+	msg->argv_envp_len = bytes;
 	msg->header.msgtype = PROVMSG_EXEC;
 	msg->header.cred_id = newsec->csid;
 
-	if (bprm->file && bprm->file->f_dentry &&
-			bprm->file->f_dentry->d_inode) {
-		sbs = bprm->file->f_dentry->d_sb->s_security;
-		memcpy(&msg->inode.sb_uuid, &sbs->uuid,
-				sizeof (msg->inode.sb_uuid));
-		msg->inode.ino = bprm->file->f_dentry->d_inode->i_ino;
-	} else {
-		printk(KERN_WARNING "PM/SM: Exec on unidentifiable inode?\n");
-	}
+	sbs = bprm->file->f_dentry->d_sb->s_security;
+	memcpy(&msg->inode.sb_uuid, &sbs->uuid,
+			sizeof (msg->inode.sb_uuid));
+	msg->inode.ino = bprm->file->f_dentry->d_inode->i_ino;
 
 	write_to_relay(msg, offsetof(struct provmsg_exec, argv_envp) + bytes);
 	rv = 0;
@@ -610,6 +596,7 @@ static int pmsm_inode_alloc_security(struct inode *inode)
 	inode->i_security = isec;
 	return 0;
 }
+
 static int pmsm_inode_init_security(struct inode *inode, struct inode *dir,
 		char **name, void **value, size_t *len)
 {
@@ -618,6 +605,7 @@ static int pmsm_inode_init_security(struct inode *inode, struct inode *dir,
 	isec->is_new = 1;
 	return -EOPNOTSUPP;
 }
+
 static void pmsm_d_instantiate(struct dentry *dentry, struct inode *inode)
 {
 	struct inode_security *isec;
@@ -625,7 +613,7 @@ static void pmsm_d_instantiate(struct dentry *dentry, struct inode *inode)
 	const struct sb_security *sbs;
 	struct provmsg_inode_alloc allocmsg;
 	struct provmsg_setattr attrmsg;
-	struct provmsg_link linkmsg;
+	struct provmsg_link *linkmsg;
 
 	if (!inode)
 		return;
@@ -633,17 +621,25 @@ static void pmsm_d_instantiate(struct dentry *dentry, struct inode *inode)
 	isec = inode->i_security;
 	if (!isec->is_new)
 		return;
-	isec->is_new = 0;
 
+	linkmsg = kmalloc(offsetof(struct provmsg_link, fname) +
+			dentry->d_name.len, GFP_KERNEL);
+	if (!linkmsg) {
+		/* XXX Can't fail from this method??? */
+		printk(KERN_ERR "Failed to allocate link msg!!\n");
+		return;
+	}
+
+	isec->is_new = 0;
 	cursec = current_security();
 
 	allocmsg.header.msgtype = PROVMSG_INODE_ALLOC;
 	attrmsg.header.msgtype = PROVMSG_SETATTR;
-	linkmsg.header.msgtype = PROVMSG_LINK;
+	linkmsg->header.msgtype = PROVMSG_LINK;
 
 	allocmsg.header.cred_id =
 		attrmsg.header.cred_id =
-		linkmsg.header.cred_id =
+		linkmsg->header.cred_id =
 		cursec->csid;
 
 	sbs = inode->i_sb->s_security;
@@ -651,22 +647,24 @@ static void pmsm_d_instantiate(struct dentry *dentry, struct inode *inode)
 			sizeof allocmsg.inode.sb_uuid);
 	allocmsg.inode.ino = inode->i_ino;
 	memcpy(&attrmsg.inode, &allocmsg.inode, sizeof attrmsg.inode);
-	memcpy(&linkmsg.inode, &allocmsg.inode, sizeof linkmsg.inode);
+	memcpy(&linkmsg->inode, &allocmsg.inode, sizeof linkmsg->inode);
 
 	attrmsg.uid = inode->i_uid;
 	attrmsg.gid = inode->i_gid;
 	attrmsg.mode = inode->i_mode;
 
-	linkmsg.dir = dentry->d_parent->d_inode->i_ino;
-	linkmsg.fname_len = dentry->d_name.len;
-	memcpy(linkmsg.fname, dentry->d_name.name, linkmsg.fname_len);
+	linkmsg->dir = dentry->d_parent->d_inode->i_ino;
+	linkmsg->fname_len = dentry->d_name.len;
+	memcpy(linkmsg->fname, dentry->d_name.name, linkmsg->fname_len);
 
 	write_to_relay(&allocmsg, sizeof allocmsg);
 	write_to_relay(&attrmsg, offsetof(struct provmsg_setattr, mode) +
 			sizeof attrmsg.mode);
-	write_to_relay(&linkmsg, offsetof(struct provmsg_link, fname) +
-			linkmsg.fname_len);
+	write_to_relay(linkmsg, offsetof(struct provmsg_link, fname) +
+			linkmsg->fname_len);
+	kfree(linkmsg);
 }
+
 static void pmsm_inode_free_security(struct inode *inode)
 {
 	const struct cred_security *cursec;
@@ -696,73 +694,101 @@ static int pmsm_inode_link(struct dentry *old_dentry, struct inode *dir,
 {
 	const struct cred_security *cursec = current_security();
 	const struct sb_security *sbs;
-	struct provmsg_link msg;
+	struct provmsg_link *msg;
 
-	msg.header.msgtype = PROVMSG_LINK;
-	msg.header.cred_id = cursec->csid;
+	msg = kmalloc(offsetof(struct provmsg_link, fname) +
+			new_dentry->d_name.len, GFP_KERNEL);
+	if (!msg)
+		return -ENOMEM;
+
+	msg->header.msgtype = PROVMSG_LINK;
+	msg->header.cred_id = cursec->csid;
 
 	sbs = old_dentry->d_sb->s_security;
-	memcpy(msg.inode.sb_uuid, sbs->uuid, sizeof msg.inode.sb_uuid);
-	msg.inode.ino = old_dentry->d_inode->i_ino;
-	msg.dir = dir->i_ino;
-	msg.fname_len = new_dentry->d_name.len;
-	memcpy(msg.fname, new_dentry->d_name.name, msg.fname_len);
+	memcpy(msg->inode.sb_uuid, sbs->uuid, sizeof msg->inode.sb_uuid);
+	msg->inode.ino = old_dentry->d_inode->i_ino;
+	msg->dir = dir->i_ino;
+	msg->fname_len = new_dentry->d_name.len;
+	memcpy(msg->fname, new_dentry->d_name.name, msg->fname_len);
 
-	write_to_relay(&msg, offsetof(struct provmsg_link, fname) +
-			msg.fname_len);
+	write_to_relay(msg, offsetof(struct provmsg_link, fname) +
+			msg->fname_len);
+	kfree(msg);
 	return 0;
 }
+
 static int pmsm_inode_unlink(struct inode *dir, struct dentry *dentry)
 {
 	const struct cred_security *cursec = current_security();
 	const struct sb_security *sbs;
-	struct provmsg_unlink msg;
+	struct provmsg_unlink *msg;
 
-	msg.header.msgtype = PROVMSG_UNLINK;
-	msg.header.cred_id = cursec->csid;
+	msg = kmalloc(offsetof(struct provmsg_unlink, fname) +
+			dentry->d_name.len, GFP_KERNEL);
+	if (!msg)
+		return -ENOMEM;
+
+	msg->header.msgtype = PROVMSG_UNLINK;
+	msg->header.cred_id = cursec->csid;
 
 	sbs = dir->i_sb->s_security;
-	memcpy(msg.dir.sb_uuid, sbs->uuid, sizeof msg.dir.sb_uuid);
-	msg.dir.ino = dir->i_ino;
-	msg.fname_len = dentry->d_name.len;
-	memcpy(msg.fname, dentry->d_name.name, msg.fname_len);
+	memcpy(msg->dir.sb_uuid, sbs->uuid, sizeof msg->dir.sb_uuid);
+	msg->dir.ino = dir->i_ino;
+	msg->fname_len = dentry->d_name.len;
+	memcpy(msg->fname, dentry->d_name.name, msg->fname_len);
 
-	write_to_relay(&msg, offsetof(struct provmsg_unlink, fname) +
-			msg.fname_len);
+	write_to_relay(msg, offsetof(struct provmsg_unlink, fname) +
+			msg->fname_len);
+	kfree(msg);
 	return 0;
 }
+
 static int pmsm_inode_rename(struct inode *old_dir, struct dentry *old_dentry,
 		struct inode *new_dir, struct dentry *new_dentry)
 {
 	const struct cred_security *cursec = current_security();
 	const struct sb_security *sbs;
-	struct provmsg_link linkmsg;
-	struct provmsg_unlink unlinkmsg;
+	struct provmsg_link *linkmsg;
+	struct provmsg_unlink *unlinkmsg;
 
-	linkmsg.header.msgtype = PROVMSG_LINK;
-	unlinkmsg.header.msgtype = PROVMSG_UNLINK;
-	linkmsg.header.cred_id =
-		unlinkmsg.header.cred_id =
+	linkmsg = kmalloc(offsetof(struct provmsg_link, fname) +
+			new_dentry->d_name.len, GFP_KERNEL);
+	if (!linkmsg)
+		return -ENOMEM;
+	unlinkmsg = kmalloc(offsetof(struct provmsg_unlink, fname) +
+			old_dentry->d_name.len, GFP_KERNEL);
+	if (!unlinkmsg) {
+		kfree(linkmsg);
+		return -ENOMEM;
+	}
+
+	linkmsg->header.msgtype = PROVMSG_LINK;
+	unlinkmsg->header.msgtype = PROVMSG_UNLINK;
+	linkmsg->header.cred_id =
+		unlinkmsg->header.cred_id =
 		cursec->csid;
 
 	sbs = old_dentry->d_sb->s_security;
-	memcpy(linkmsg.inode.sb_uuid, sbs->uuid, sizeof linkmsg.inode.sb_uuid);
-	memcpy(unlinkmsg.dir.sb_uuid, sbs->uuid,
-			sizeof unlinkmsg.dir.sb_uuid);
-	linkmsg.inode.ino = old_dentry->d_inode->i_ino;
+	memcpy(linkmsg->inode.sb_uuid, sbs->uuid,
+			sizeof linkmsg->inode.sb_uuid);
+	memcpy(unlinkmsg->dir.sb_uuid, sbs->uuid,
+			sizeof unlinkmsg->dir.sb_uuid);
+	linkmsg->inode.ino = old_dentry->d_inode->i_ino;
 
-	linkmsg.dir = new_dir->i_ino;
-	linkmsg.fname_len = new_dentry->d_name.len;
-	memcpy(linkmsg.fname, new_dentry->d_name.name, linkmsg.fname_len);
+	linkmsg->dir = new_dir->i_ino;
+	linkmsg->fname_len = new_dentry->d_name.len;
+	memcpy(linkmsg->fname, new_dentry->d_name.name, linkmsg->fname_len);
 
-	unlinkmsg.dir.ino = old_dir->i_ino;
-	unlinkmsg.fname_len = old_dentry->d_name.len;
-	memcpy(unlinkmsg.fname, old_dentry->d_name.name, unlinkmsg.fname_len);
+	unlinkmsg->dir.ino = old_dir->i_ino;
+	unlinkmsg->fname_len = old_dentry->d_name.len;
+	memcpy(unlinkmsg->fname, old_dentry->d_name.name, unlinkmsg->fname_len);
 
-	write_to_relay(&linkmsg, offsetof(struct provmsg_link, fname) +
-			linkmsg.fname_len);
-	write_to_relay(&unlinkmsg, offsetof(struct provmsg_unlink, fname) +
-			unlinkmsg.fname_len);
+	write_to_relay(linkmsg, offsetof(struct provmsg_link, fname) +
+			linkmsg->fname_len);
+	write_to_relay(unlinkmsg, offsetof(struct provmsg_unlink, fname) +
+			unlinkmsg->fname_len);
+	kfree(unlinkmsg);
+	kfree(linkmsg);
 	return 0;
 }
 
