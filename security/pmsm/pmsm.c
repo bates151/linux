@@ -548,7 +548,6 @@ static int pmsm_bprm_check_security(struct linux_binprm *bprm)
 		printk(KERN_ERR "PM/SM: Failed to allocate exec message\n");
 		return -ENOMEM;
 	}
-	printk(KERN_ERR "msg=%p argv_envp=%p\n", msg, msg->argv_envp);
 	rv = copy_bytes_bprm(bprm, msg->argv_envp, bytes);
 	if (rv < 0) {
 		printk(KERN_ERR "PM/SM: Exec copy failed %d\n", rv);
