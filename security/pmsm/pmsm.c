@@ -139,7 +139,7 @@ static int copy_bytes_bprm(struct linux_binprm *bprm, char *dst,
 {
 	int rv = 0;
 	unsigned int ofs, bytes;
-	struct page *page = NULL, *new_page = NULL;
+	struct page *page = NULL, *new_page;
 	const char *kaddr;
 	unsigned long src;
 
