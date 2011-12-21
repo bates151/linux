@@ -585,7 +585,7 @@ static int hifi_inode_alloc_security(struct inode *inode)
 }
 
 static int hifi_inode_init_security(struct inode *inode, struct inode *dir,
-		char **name, void **value, size_t *len)
+		const struct qstr *qstr, char **name, void **value, size_t *len)
 {
 	struct inode_security *isec = inode->i_security;
 
