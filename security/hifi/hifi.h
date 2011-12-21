@@ -1,5 +1,5 @@
-#ifndef _SECURITY_PMSM_H
-#define _SECURITY_PMSM_H
+#ifndef _SECURITY_HIFI_H
+#define _SECURITY_HIFI_H
 
 
 #include <linux/types.h>
@@ -7,12 +7,12 @@
 
 
 /* Key names for xattrs */
-#define XATTR_PMSM_SUFFIX "pmsm"
-#define XATTR_NAME_PMSM XATTR_SECURITY_PREFIX XATTR_PMSM_SUFFIX
+#define XATTR_HIFI_SUFFIX "hifi"
+#define XATTR_NAME_HIFI XATTR_SECURITY_PREFIX XATTR_HIFI_SUFFIX
 
 
 /* Shortcut for security_operations */
-#define HANDLE(HOOK) .HOOK = pmsm_##HOOK
+#define HANDLE(HOOK) .HOOK = hifi_##HOOK
 
 
 

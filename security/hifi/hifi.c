@@ -1,5 +1,5 @@
 /*
- *  PM/SM
+ *  Hi-Fi
  *
  *  Monitors provenance at the LSM layer.
  *
@@ -37,8 +37,8 @@
 #include <linux/relay.h>
 #include <linux/spinlock.h>
 
-#include "pmsm.h"
-#include "pmsm_proto.h"
+#include "hifi.h"
+#include "hifi_proto.h"
 
 
 MODULE_AUTHOR("Devin J. Pohly");
@@ -95,7 +95,7 @@ static void write_to_relay(const void *data, size_t length)
 	spin_lock_irqsave(&relay_lock, flags);
 	if (unlikely(!relay)) {
 		if (boot_bytes + length > BOOT_BUFFER_SIZE)
-			panic("PM/SM: Boot buffer overrun");
+			panic("Hi-Fi: Boot buffer overrun");
 		memcpy(boot_buffer + boot_bytes, data, length);
 		boot_bytes += length;
 	} else {
@@ -108,7 +108,7 @@ static void write_to_relay(const void *data, size_t length)
 static const struct provmsg_boot init_bootmsg = {
 	.header.msgtype = PROVMSG_BOOT,
 	.header.cred_id = 0,
-	.version = PMSM_PROTO_VERSION,
+	.version = HIFI_PROTO_VERSION,
 };
 static const struct provmsg_setid init_setidmsg = {
 	.header.msgtype = PROVMSG_SETID,
@@ -122,10 +122,10 @@ static void init_relay(void)
 	relay = relay_open("provenance", NULL, (RELAY_TOTAL_SIZE / NUM_RELAYS),
 			NUM_RELAYS, &relay_callbacks, NULL);
 	if (!relay)
-		panic("PM/SM could not create relay");
+		panic("Hi-Fi: Could not create relay");
 	write_to_relay(&init_bootmsg, sizeof(init_bootmsg));
 	write_to_relay(&init_setidmsg, sizeof(init_setidmsg));
-	printk(KERN_INFO "PM/SM: Replaying boot buffer: %uB\n", boot_bytes);
+	printk(KERN_INFO "Hi-Fi: Replaying boot buffer: %uB\n", boot_bytes);
 	write_to_relay(boot_buffer, boot_bytes);
 	kfree(boot_buffer);
 }
@@ -190,7 +190,7 @@ out_unmap:
  */
 
 /* This is the first hook that runs after the mount tree is initialized */
-static int pmsm_socket_create(int family, int type, int protocol, int kern)
+static int hifi_socket_create(int family, int type, int protocol, int kern)
 {
 	if (!relay)
 		init_relay();
@@ -198,7 +198,7 @@ static int pmsm_socket_create(int family, int type, int protocol, int kern)
 }
 
 /* Allocates the sb_security structure for this superblock. */
-static int pmsm_sb_alloc_security(struct super_block *sb)
+static int hifi_sb_alloc_security(struct super_block *sb)
 {
 	struct sb_security *sbs;
 
@@ -211,7 +211,7 @@ static int pmsm_sb_alloc_security(struct super_block *sb)
 }
 
 /* Frees the sb_security structure for this superblock. */
-static void pmsm_sb_free_security(struct super_block *sb)
+static void hifi_sb_free_security(struct super_block *sb)
 {
 	struct sb_security *sbs = sb->s_security;
 
@@ -225,7 +225,7 @@ static void pmsm_sb_free_security(struct super_block *sb)
  */
 /* Precondition asserted by BUG_ON: sb != NULL */
 /* Precondition asserted by get_sb: sb->s_root != NULL */
-static int pmsm_sb_kern_mount(struct super_block *sb, int flags, void *data)
+static int hifi_sb_kern_mount(struct super_block *sb, int flags, void *data)
 {
 	struct sb_security *sbs;
 	struct dentry *d_root;
@@ -241,7 +241,7 @@ static int pmsm_sb_kern_mount(struct super_block *sb, int flags, void *data)
 		 * XXX Treats filesystems with no xattr support as new every
 		 * time - provenance continuity is lost here!
 		 */
-		printk(KERN_WARNING "PM/SM: no xattr support for "
+		printk(KERN_WARNING "Hi-Fi: no xattr support for "
 		                            "%s\n", sb->s_type->name);
 		generate_random_uuid(sbs->uuid);
 		goto out;
@@ -249,12 +249,12 @@ static int pmsm_sb_kern_mount(struct super_block *sb, int flags, void *data)
 
 	mutex_lock(&i_root->i_mutex);
 
-	rv = i_root->i_op->getxattr(d_root, XATTR_NAME_PMSM, sbs->uuid, 16);
+	rv = i_root->i_op->getxattr(d_root, XATTR_NAME_HIFI, sbs->uuid, 16);
 	if (rv == 16) {
 		rv = 0;
 	} else if (rv >= 0 || rv == -ENODATA) {
 		/* Only mount filesystems that are correctly labeled */
-		printk(KERN_ERR "PM/SM: Missing or malformed UUID label "
+		printk(KERN_ERR "Hi-Fi: Missing or malformed UUID label "
 				"on filesystem.  If this is\n");
 		printk(KERN_ERR "       your root filesystem, kernel may "
 				"panic or drop to initrd.\n");
@@ -264,12 +264,12 @@ static int pmsm_sb_kern_mount(struct super_block *sb, int flags, void *data)
 		 * Treat as a never-encountered filesystem (apropos for tmpfs,
 		 * which throws this error, but XXX not nfs4 which also does)
 		 */
-		printk(KERN_WARNING "PM/SM: getxattr unsupported dev=%s "
+		printk(KERN_WARNING "Hi-Fi: getxattr unsupported dev=%s "
 				"type=%s\n", sb->s_id, sb->s_type->name);
 		generate_random_uuid(sbs->uuid);
 		rv = 0;
 	} else {
-		printk(KERN_ERR "PM/SM: getxattr dev=%s type=%s "
+		printk(KERN_ERR "Hi-Fi: getxattr dev=%s type=%s "
 				"err=%d\n", sb->s_id, sb->s_type->name, -rv);
 		/* rv from getxattr falls through */
 	}
@@ -393,7 +393,7 @@ static void cred_security_destroy(struct kref *ref)
 /*
  * Free the security part of a set of credentials
  */
-static void pmsm_cred_free(struct cred *cred)
+static void hifi_cred_free(struct cred *cred)
 {
 	struct cred_security *csec = cred->security;
 
@@ -404,7 +404,7 @@ static void pmsm_cred_free(struct cred *cred)
 /*
  * Prepare a new set of credentials
  */
-static int pmsm_cred_prepare(struct cred *new, const struct cred *old,
+static int hifi_cred_prepare(struct cred *new, const struct cred *old,
                              gfp_t gfp)
 {
 	struct cred_security *old_csec = old->security;
@@ -444,7 +444,7 @@ out_free:
  * Allocate the security part of a blank set of credentials - used only with
  * cred_transfer in the context of keys
  */
-static int pmsm_cred_alloc_blank(struct cred *cred, gfp_t gfp)
+static int hifi_cred_alloc_blank(struct cred *cred, gfp_t gfp)
 {
 	struct cred_security *csec;
 	int id;
@@ -469,7 +469,7 @@ static int pmsm_cred_alloc_blank(struct cred *cred, gfp_t gfp)
  * Copies an existing set of credentials into an already-allocated blank
  * set of credentials - used only with cred_alloc_blank in the context of keys
  */
-static void pmsm_cred_transfer(struct cred *new, const struct cred *old)
+static void hifi_cred_transfer(struct cred *new, const struct cred *old)
 {
 	struct cred_security *old_csec = old->security;
 	struct cred_security *csec = new->security;
@@ -488,7 +488,7 @@ static void pmsm_cred_transfer(struct cred *new, const struct cred *old)
 /*
  * Install a new set of credentials
  */
-static int pmsm_task_fix_setuid(struct cred *new, const struct cred *old,
+static int hifi_task_fix_setuid(struct cred *new, const struct cred *old,
 		int flags)
 {
 	const struct cred_security *csec = new->security;
@@ -518,7 +518,7 @@ static int pmsm_task_fix_setuid(struct cred *new, const struct cred *old,
  * its disposal, and may be called more than once if there in an interpreter
  * involved.
  */
-static int pmsm_bprm_check_security(struct linux_binprm *bprm)
+static int hifi_bprm_check_security(struct linux_binprm *bprm)
 {
 	int rv;
 	const struct cred_security *cursec = current_security();
@@ -537,7 +537,7 @@ static int pmsm_bprm_check_security(struct linux_binprm *bprm)
 	if (bprm->file->f_dentry->d_inode->i_op->getxattr) {
 		rv = bprm->file->f_dentry->d_inode->i_op->getxattr(
 				bprm->file->f_dentry,
-				XATTR_NAME_PMSM, xattr, 7);
+				XATTR_NAME_HIFI, xattr, 7);
 		if (rv >= 0 && !strncmp(xattr, "exempt", 6))
 			newsec->flags |= CSEC_EXEMPT;
 	}
@@ -545,12 +545,12 @@ static int pmsm_bprm_check_security(struct linux_binprm *bprm)
 	bytes = bprm->exec - bprm->p;
 	msg = kmalloc(sizeof(*msg) + bytes, GFP_KERNEL);
 	if (!msg) {
-		printk(KERN_ERR "PM/SM: Failed to allocate exec message\n");
+		printk(KERN_ERR "Hi-Fi: Failed to allocate exec message\n");
 		return -ENOMEM;
 	}
 	rv = copy_bytes_bprm(bprm, msg->argv_envp, bytes);
 	if (rv < 0) {
-		printk(KERN_ERR "PM/SM: Exec copy failed %d\n", rv);
+		printk(KERN_ERR "Hi-Fi: Exec copy failed %d\n", rv);
 		goto out;
 	}
 	msg->argv_envp_len = bytes;
@@ -573,7 +573,7 @@ out:
 /*
  * These four hooks, taken together, catch inode creation and deletion
  */
-static int pmsm_inode_alloc_security(struct inode *inode)
+static int hifi_inode_alloc_security(struct inode *inode)
 {
 	struct inode_security *isec;
 
@@ -584,7 +584,7 @@ static int pmsm_inode_alloc_security(struct inode *inode)
 	return 0;
 }
 
-static int pmsm_inode_init_security(struct inode *inode, struct inode *dir,
+static int hifi_inode_init_security(struct inode *inode, struct inode *dir,
 		char **name, void **value, size_t *len)
 {
 	struct inode_security *isec = inode->i_security;
@@ -593,7 +593,7 @@ static int pmsm_inode_init_security(struct inode *inode, struct inode *dir,
 	return -EOPNOTSUPP;
 }
 
-static void pmsm_d_instantiate(struct dentry *dentry, struct inode *inode)
+static void hifi_d_instantiate(struct dentry *dentry, struct inode *inode)
 {
 	struct inode_security *isec;
 	const struct cred_security *cursec;
@@ -649,7 +649,7 @@ static void pmsm_d_instantiate(struct dentry *dentry, struct inode *inode)
 	kfree(linkmsg);
 }
 
-static void pmsm_inode_free_security(struct inode *inode)
+static void hifi_inode_free_security(struct inode *inode)
 {
 	const struct cred_security *cursec;
 	const struct sb_security *sbs;
@@ -673,7 +673,7 @@ static void pmsm_inode_free_security(struct inode *inode)
 /*
  * Hooks for tracking name and location of inodes over time.
  */
-static int pmsm_inode_link(struct dentry *old_dentry, struct inode *dir,
+static int hifi_inode_link(struct dentry *old_dentry, struct inode *dir,
 		struct dentry *new_dentry)
 {
 	const struct cred_security *cursec = current_security();
@@ -699,7 +699,7 @@ static int pmsm_inode_link(struct dentry *old_dentry, struct inode *dir,
 	return 0;
 }
 
-static int pmsm_inode_unlink(struct inode *dir, struct dentry *dentry)
+static int hifi_inode_unlink(struct inode *dir, struct dentry *dentry)
 {
 	const struct cred_security *cursec = current_security();
 	const struct sb_security *sbs;
@@ -723,7 +723,7 @@ static int pmsm_inode_unlink(struct inode *dir, struct dentry *dentry)
 	return 0;
 }
 
-static int pmsm_inode_rename(struct inode *old_dir, struct dentry *old_dentry,
+static int hifi_inode_rename(struct inode *old_dir, struct dentry *old_dentry,
 		struct inode *new_dir, struct dentry *new_dentry)
 {
 	const struct cred_security *cursec = current_security();
@@ -773,7 +773,7 @@ static int pmsm_inode_rename(struct inode *old_dir, struct dentry *old_dentry,
  * Hook for changes to inode attributes.  Specifically, we're tracking owner,
  * group, and mode.
  */
-int pmsm_inode_setattr(struct dentry *dentry, struct iattr *attr)
+int hifi_inode_setattr(struct dentry *dentry, struct iattr *attr)
 {
 	const struct cred_security *cursec;
 	const struct sb_security *sbs;
@@ -805,7 +805,7 @@ int pmsm_inode_setattr(struct dentry *dentry, struct iattr *attr)
  * Run at every call to read or write.  The only calls to this function have
  * @mask set to either MAY_READ or MAY_WRITE, nothing else, and never both.
  */
-static int pmsm_file_permission(struct file *file, int mask)
+static int hifi_file_permission(struct file *file, int mask)
 {
 	const struct cred_security *cursec = current_security();
 	const struct sb_security *sbs;
@@ -838,7 +838,7 @@ static int pmsm_file_permission(struct file *file, int mask)
  * file mapped read-write is both read and written by the process at all times.
  * TODO: What does this "at all times" imply?  Ouch!
  */
-static int pmsm_file_mmap(struct file *file, unsigned long reqprot,
+static int hifi_file_mmap(struct file *file, unsigned long reqprot,
                           unsigned long prot, unsigned long flags,
                           unsigned long addr, unsigned long addr_only)
 {
@@ -872,7 +872,7 @@ static int pmsm_file_mmap(struct file *file, unsigned long reqprot,
  * which pass provenance from the metadata stored in the directory inode
  * itself.
  */
-static int pmsm_inode_permission(struct inode *inode, int mask)
+static int hifi_inode_permission(struct inode *inode, int mask)
 {
 	const struct cred_security *cursec = current_security();
 	const struct sb_security *sbs;
@@ -902,7 +902,7 @@ static int pmsm_inode_permission(struct inode *inode, int mask)
 /*
  * Security alloc/free for individual messages in a message queue
  */
-static int pmsm_msg_msg_alloc_security(struct msg_msg *msg) {
+static int hifi_msg_msg_alloc_security(struct msg_msg *msg) {
 	struct msg_security *msgsec;
 
 	msgsec = kzalloc(sizeof(*msgsec), GFP_KERNEL);
@@ -913,7 +913,7 @@ static int pmsm_msg_msg_alloc_security(struct msg_msg *msg) {
 	return 0;
 }
 
-static void pmsm_msg_msg_free_security(struct msg_msg *msg) {
+static void hifi_msg_msg_free_security(struct msg_msg *msg) {
 	struct msg_security *msgsec = msg->security;
 	int id = msgsec->msgid;
 
@@ -922,7 +922,7 @@ static void pmsm_msg_msg_free_security(struct msg_msg *msg) {
 	free_provid(id);
 }
 
-static int pmsm_msg_queue_msgsnd(struct msg_queue *msq, struct msg_msg *msg,
+static int hifi_msg_queue_msgsnd(struct msg_queue *msq, struct msg_msg *msg,
 		int msqflg) {
 	const struct cred_security *cursec = current_security();
 	const struct msg_security *msgsec = msg->security;
@@ -936,7 +936,7 @@ static int pmsm_msg_queue_msgsnd(struct msg_queue *msq, struct msg_msg *msg,
 	return 0;
 }
 
-static int pmsm_msg_queue_msgrcv(struct msg_queue *msq, struct msg_msg *msg,
+static int hifi_msg_queue_msgrcv(struct msg_queue *msq, struct msg_msg *msg,
 		struct task_struct *target, long type, int mode) {
 	const struct cred_security *cursec = target->cred->security;
 	const struct msg_security *msgsec = msg->security;
@@ -979,8 +979,8 @@ out_nomem:
 	return -ENOMEM;
 }
 
-struct security_operations pmsm_security_ops = {
-	.name    = "pmsm",
+struct security_operations hifi_security_ops = {
+	.name    = "hifi",
 	HANDLE(socket_create),
 
 	HANDLE(sb_alloc_security),
@@ -1015,29 +1015,29 @@ struct security_operations pmsm_security_ops = {
 	HANDLE(bprm_check_security),
 };
 
-static int __init pmsm_init(void)
+static int __init hifi_init(void)
 {
 	int rv = 0;
 
-	if (!security_module_enable(&pmsm_security_ops)) {
-		printk(KERN_ERR "PM/SM: ERROR - failed to enable module\n");
+	if (!security_module_enable(&hifi_security_ops)) {
+		printk(KERN_ERR "Hi-Fi: ERROR - failed to enable module\n");
 		return -EINVAL;
 	}
-	printk(KERN_INFO "PM/SM: module enabled\n");
+	printk(KERN_INFO "Hi-Fi: module enabled\n");
 
 	boot_buffer = kmalloc(BOOT_BUFFER_SIZE, GFP_KERNEL);
 	rv = init_provid_map();
 	if (rv)
 		return rv;
 	if (set_init_creds())
-		panic("PM/SM: Failed to allocate creds for initial task.");
+		panic("Hi-Fi: Failed to allocate creds for initial task.");
 
 	/* Finally register */
-	if (register_security(&pmsm_security_ops))
-		panic("PM/SM: failed to register operations");
+	if (register_security(&hifi_security_ops))
+		panic("Hi-Fi: failed to register operations");
 
-	printk(KERN_INFO "PM/SM: registered\n");
+	printk(KERN_INFO "Hi-Fi: registered\n");
 	return 0;
 }
 
-security_initcall(pmsm_init);
+security_initcall(hifi_init);

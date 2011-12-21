@@ -183,7 +183,7 @@ config LSM_MMAP_MIN_ADDR
 	  this low address space will need the permission specific to the
 	  systems running LSM.
 
-source security/pmsm/Kconfig
+source security/hifi/Kconfig
 source security/selinux/Kconfig
 source security/smack/Kconfig
 source security/tomoyo/Kconfig
@@ -193,7 +193,7 @@ source security/integrity/Kconfig
 
 choice
 	prompt "Default security module"
-	default DEFAULT_SECURITY_PMSM if SECURITY_PMSM
+	default DEFAULT_SECURITY_HIFI if SECURITY_HIFI
 	default DEFAULT_SECURITY_SELINUX if SECURITY_SELINUX
 	default DEFAULT_SECURITY_SMACK if SECURITY_SMACK
 	default DEFAULT_SECURITY_TOMOYO if SECURITY_TOMOYO
@@ -204,8 +204,8 @@ choice
 	  Select the security module that will be used by default if the
 	  kernel parameter security= is not specified.
 
-	config DEFAULT_SECURITY_PMSM
-		bool "PM/SM" if SECURITY_PMSM=y
+	config DEFAULT_SECURITY_HIFI
+		bool "Hi-Fi" if SECURITY_HIFI=y
 
 	config DEFAULT_SECURITY_SELINUX
 		bool "SELinux" if SECURITY_SELINUX=y
@@ -226,7 +226,7 @@ endchoice
 
 config DEFAULT_SECURITY
 	string
-	default "pmsm" if DEFAULT_SECURITY_PMSM
+	default "hifi" if DEFAULT_SECURITY_HIFI
 	default "selinux" if DEFAULT_SECURITY_SELINUX
 	default "smack" if DEFAULT_SECURITY_SMACK
 	default "tomoyo" if DEFAULT_SECURITY_TOMOYO

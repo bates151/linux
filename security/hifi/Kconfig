@@ -1,0 +1,9 @@
+config SECURITY_HIFI
+	bool "High-fidelity provenance monitor"
+	depends on SECURITY
+	default n
+	help
+	  This enables the high-fidelity provenance monitor (Hi-Fi).
+
+	  If you are unsure how to answer this question, answer N.
+
