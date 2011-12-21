@@ -571,64 +571,35 @@ out:
 
 
 /*
- * These four hooks, taken together, catch inode creation and deletion
+ * Inode creation and deletion
  */
-static int hifi_inode_alloc_security(struct inode *inode)
-{
-	struct inode_security *isec;
-
-	isec = kzalloc(sizeof(*isec), GFP_KERNEL);
-	if (!isec)
-		return -ENOMEM;
-	inode->i_security = isec;
-	return 0;
-}
-
 static int hifi_inode_init_security(struct inode *inode, struct inode *dir,
 		const struct qstr *qstr, char **name, void **value, size_t *len)
 {
-	struct inode_security *isec = inode->i_security;
-
-	isec->is_new = 1;
-	return -EOPNOTSUPP;
-}
-
-static void hifi_d_instantiate(struct dentry *dentry, struct inode *inode)
-{
-	struct inode_security *isec;
 	const struct cred_security *cursec;
 	const struct sb_security *sbs;
 	struct provmsg_inode_alloc allocmsg;
 	struct provmsg_setattr attrmsg;
 	struct provmsg_link *linkmsg;
 
-	if (!inode)
-		return;
-
-	isec = inode->i_security;
-	if (!isec->is_new)
-		return;
-
-	linkmsg = kmalloc(sizeof(*linkmsg) + dentry->d_name.len, GFP_KERNEL);
+	linkmsg = kmalloc(sizeof(*linkmsg) + qstr->len, GFP_KERNEL);
 	if (!linkmsg) {
-		/* XXX Can't fail from this method??? */
-		printk(KERN_ERR "Failed to allocate link msg!!\n");
-		return;
+		printk(KERN_ERR "Hi-Fi: Failed to allocate link msg\n");
+		return -ENOMEM;
 	}
 
-	isec->is_new = 0;
 	cursec = current_security();
+	sbs = inode->i_sb->s_security;
 
 	allocmsg.header.msgtype = PROVMSG_INODE_ALLOC;
+	allocmsg.header.cred_id = cursec->csid;
+
 	attrmsg.header.msgtype = PROVMSG_SETATTR;
+	attrmsg.header.cred_id = cursec->csid;
+
 	linkmsg->header.msgtype = PROVMSG_LINK;
+	linkmsg->header.cred_id = cursec->csid;
 
-	allocmsg.header.cred_id =
-		attrmsg.header.cred_id =
-		linkmsg->header.cred_id =
-		cursec->csid;
-
-	sbs = inode->i_sb->s_security;
 	memcpy(allocmsg.inode.sb_uuid, sbs->uuid,
 			sizeof(allocmsg.inode.sb_uuid));
 	allocmsg.inode.ino = inode->i_ino;
@@ -639,14 +610,16 @@ static void hifi_d_instantiate(struct dentry *dentry, struct inode *inode)
 	attrmsg.gid = inode->i_gid;
 	attrmsg.mode = inode->i_mode;
 
-	linkmsg->dir = dentry->d_parent->d_inode->i_ino;
-	linkmsg->fname_len = dentry->d_name.len;
-	memcpy(linkmsg->fname, dentry->d_name.name, linkmsg->fname_len);
+	linkmsg->dir = dir->i_ino;
+	linkmsg->fname_len = qstr->len;
+	memcpy(linkmsg->fname, qstr->name, linkmsg->fname_len);
 
 	write_to_relay(&allocmsg, sizeof(allocmsg));
 	write_to_relay(&attrmsg, sizeof(attrmsg));
 	write_to_relay(linkmsg, sizeof(*linkmsg) + linkmsg->fname_len);
 	kfree(linkmsg);
+
+	return -EOPNOTSUPP;
 }
 
 static void hifi_inode_free_security(struct inode *inode)
@@ -655,7 +628,6 @@ static void hifi_inode_free_security(struct inode *inode)
 	const struct sb_security *sbs;
 	struct provmsg_inode_dealloc msg;
 
-	kfree(inode->i_security);
 	if (inode->i_nlink != 0)
 		return;
 
@@ -991,9 +963,7 @@ struct security_operations hifi_security_ops = {
 	HANDLE(file_mmap),
 	HANDLE(inode_permission),
 
-	HANDLE(inode_alloc_security),
 	HANDLE(inode_init_security),
-	HANDLE(d_instantiate),
 	HANDLE(inode_free_security),
 
 	HANDLE(inode_link),

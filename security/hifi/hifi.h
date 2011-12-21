@@ -41,11 +41,6 @@ struct sb_security {
 };
 
 
-/* Security structure for inodes. */
-struct inode_security {
-	int is_new;
-};
-
 /* Security structure for XSI message queues */
 struct msg_security {
 	u32 msgid;
