@@ -252,6 +252,11 @@ static int hifi_sb_kern_mount(struct super_block *sb, int flags, void *data)
 	rv = i_root->i_op->getxattr(d_root, XATTR_NAME_HIFI, sbs->uuid, 16);
 	if (rv == 16) {
 		rv = 0;
+	} else if (!strcmp("tmpfs", sb->s_type->name) ||
+			!strcmp("devtmpfs", sb->s_type->name)) {
+		/* Treat as a never-encountered filesystem */
+		generate_random_uuid(sbs->uuid);
+		rv = 0;
 	} else if (rv >= 0 || rv == -ENODATA) {
 		/* Only mount filesystems that are correctly labeled */
 		printk(KERN_ERR "Hi-Fi: Missing or malformed UUID label "
@@ -259,15 +264,6 @@ static int hifi_sb_kern_mount(struct super_block *sb, int flags, void *data)
 		printk(KERN_ERR "       your root filesystem, kernel may "
 				"panic or drop to initrd.\n");
 		rv = -EPERM;
-	} else if (rv == -EOPNOTSUPP) {
-		/*
-		 * Treat as a never-encountered filesystem (apropos for tmpfs,
-		 * which throws this error, but XXX not nfs4 which also does)
-		 */
-		printk(KERN_WARNING "Hi-Fi: getxattr unsupported dev=%s "
-				"type=%s\n", sb->s_id, sb->s_type->name);
-		generate_random_uuid(sbs->uuid);
-		rv = 0;
 	} else {
 		printk(KERN_ERR "Hi-Fi: getxattr dev=%s type=%s "
 				"err=%d\n", sb->s_id, sb->s_type->name, -rv);
