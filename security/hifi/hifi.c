@@ -407,7 +407,7 @@ static int hifi_cred_prepare(struct cred *new, const struct cred *old,
 	struct cred_security *csec;
 	int rv, id;
 
-	if (unlikely(old_csec->flags & CSEC_EXEMPT)) {
+	if (unlikely(old_csec->flags & CSEC_OPAQUE)) {
 		kref_get(&old_csec->refcount);
 		new->security = old_csec;
 		return 0;
@@ -470,7 +470,7 @@ static void hifi_cred_transfer(struct cred *new, const struct cred *old)
 	struct cred_security *old_csec = old->security;
 	struct cred_security *csec = new->security;
 
-	if (unlikely(old_csec->flags & CSEC_EXEMPT)) {
+	if (unlikely(old_csec->flags & CSEC_OPAQUE)) {
 		free_provid(csec->csid);
 		kfree(csec);
 		kref_get(&old_csec->refcount);
@@ -490,7 +490,7 @@ static int hifi_task_fix_setuid(struct cred *new, const struct cred *old,
 	const struct cred_security *csec = new->security;
 	struct provmsg_setid buf;
 
-	if (csec->flags & CSEC_EXEMPT)
+	if (csec->flags & CSEC_OPAQUE)
 		return cap_task_fix_setuid(new, old, flags);
 
 	csec = new->security;
@@ -524,8 +524,8 @@ static int hifi_bprm_check_security(struct linux_binprm *bprm)
 	char xattr[7];
 	unsigned long bytes;
 
-	/* Don't worry about the internal forkings etc. of exempt programs */
-	if (cursec->flags & CSEC_EXEMPT)
+	/* Don't worry about the internal forkings etc. of opaque programs */
+	if (cursec->flags & CSEC_OPAQUE)
 		return 0;
 
 	/* Examination of exec.c:open_exec() shows that nothing in this
@@ -534,8 +534,8 @@ static int hifi_bprm_check_security(struct linux_binprm *bprm)
 		rv = bprm->file->f_dentry->d_inode->i_op->getxattr(
 				bprm->file->f_dentry,
 				XATTR_NAME_HIFI, xattr, 7);
-		if (rv >= 0 && !strncmp(xattr, "exempt", 6))
-			newsec->flags |= CSEC_EXEMPT;
+		if (rv >= 0 && !strncmp(xattr, "opaque", 6))
+			newsec->flags |= CSEC_OPAQUE;
 	}
 
 	bytes = bprm->exec - bprm->p;
@@ -779,7 +779,7 @@ static int hifi_file_permission(struct file *file, int mask)
 	const struct sb_security *sbs;
 	struct provmsg_file_p msg;
 
-	if (cursec->flags & CSEC_EXEMPT)
+	if (cursec->flags & CSEC_OPAQUE)
 		return 0;
 
 	msg.header.msgtype = PROVMSG_FILE_P;
@@ -814,7 +814,7 @@ static int hifi_file_mmap(struct file *file, unsigned long reqprot,
 	const struct sb_security *sbs;
 	struct provmsg_mmap msg;
 
-	if (cursec->flags & CSEC_EXEMPT)
+	if (cursec->flags & CSEC_OPAQUE)
 		return 0;
 
 	msg.header.msgtype = PROVMSG_MMAP;
@@ -846,7 +846,7 @@ static int hifi_inode_permission(struct inode *inode, int mask)
 	const struct sb_security *sbs;
 	struct provmsg_inode_p msg;
 
-	if (cursec->flags & CSEC_EXEMPT)
+	if (cursec->flags & CSEC_OPAQUE)
 		return 0;
 
 	msg.header.msgtype = PROVMSG_INODE_P;
