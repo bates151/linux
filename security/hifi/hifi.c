@@ -352,7 +352,7 @@ static void free_provid(int id) {
 /*
  * Initializes a new cred_security object
  */
-static int cred_security_init(struct cred_security *csec,
+static void cred_security_init(struct cred_security *csec,
 		const struct cred_security *old)
 {
 	struct provmsg_credfork buf;
@@ -362,7 +362,6 @@ static int cred_security_init(struct cred_security *csec,
 	buf.header.cred_id = old->csid;
 	buf.forked_cred = csec->csid;
 	write_to_relay(&buf, sizeof(buf));
-	return 0;
 }
 
 /*
@@ -422,9 +421,7 @@ static int hifi_cred_prepare(struct cred *new, const struct cred *old,
 		goto out_free;
 	csec->csid = id;
 	kref_init(&csec->refcount);
-	rv = cred_security_init(csec, old_csec);
-	if (rv)
-		goto out_free_id;
+	cred_security_init(csec, old_csec);
 
 	new->security = csec;
 	return 0;
