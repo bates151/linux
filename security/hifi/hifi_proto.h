@@ -44,6 +44,7 @@ enum {
 	PROVMSG_UNLINK,
 	PROVMSG_MQSEND,
 	PROVMSG_MQRECV,
+	PROVMSG_SHMAT,
 
 	NUM_PROVMSG_TYPES
 };
@@ -136,6 +137,11 @@ struct provmsg_mqsend {
 struct provmsg_mqrecv {
 	struct provmsg_hdr header;
 	uint32_t msgid;
+} __attribute__((packed));
+struct provmsg_shmat {
+	struct provmsg_hdr header;
+	uint32_t shmid;
+	uint32_t flags;
 } __attribute__((packed));
 
 

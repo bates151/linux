@@ -426,7 +426,6 @@ static int hifi_cred_prepare(struct cred *new, const struct cred *old,
 	new->security = csec;
 	return 0;
 
-out_free_id:
 	free_provid(id);
 out_free:
 	kfree(csec);
@@ -865,6 +864,48 @@ static int hifi_inode_permission(struct inode *inode, int mask)
 
 
 /*
+ * XSI shared memory
+ */
+static int hifi_shm_alloc_security(struct shmid_kernel *shp)
+{
+	struct shm_security *shmsec;
+
+	shmsec = kzalloc(sizeof(*shmsec), GFP_KERNEL);
+	if (!shmsec)
+		return -ENOMEM;
+	shmsec->shmid = alloc_provid();
+	shp->shm_perm.security = shmsec;
+	return 0;
+}
+
+static void hifi_shm_free_security(struct shmid_kernel *shp)
+{
+	struct shm_security *shmsec = shp->shm_perm.security;
+	int id = shmsec->shmid;
+
+	shp->shm_perm.security = NULL;
+	kfree(shmsec);
+	free_provid(id);
+}
+
+static int hifi_shm_shmat(struct shmid_kernel *shp, char __user *shmaddr,
+		int shmflg)
+{
+	const struct cred_security *cursec = current_security();
+	const struct shm_security *shmsec = shp->shm_perm.security;
+	struct provmsg_shmat logmsg;
+
+	logmsg.header.msgtype = PROVMSG_SHMAT;
+	logmsg.header.cred_id = cursec->csid;
+	logmsg.shmid = shmsec->shmid;
+	logmsg.flags = shmflg;
+
+	write_to_relay(&logmsg, sizeof(logmsg));
+	return 0;
+}
+
+
+/*
  * Security alloc/free for individual messages in a message queue
  */
 static int hifi_msg_msg_alloc_security(struct msg_msg *msg) {
@@ -963,6 +1004,10 @@ struct security_operations hifi_security_ops = {
 	HANDLE(inode_unlink),
 	HANDLE(inode_rename),
 	HANDLE(inode_setattr),
+
+	HANDLE(shm_alloc_security),
+	HANDLE(shm_free_security),
+	HANDLE(shm_shmat),
 
 	HANDLE(msg_msg_alloc_security),
 	HANDLE(msg_msg_free_security),

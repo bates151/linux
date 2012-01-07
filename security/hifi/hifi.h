@@ -40,9 +40,13 @@ struct sb_security {
 };
 
 
-/* Security structure for XSI message queues */
+/* Security structures for XSI IPC */
 struct msg_security {
 	u32 msgid;
+};
+
+struct shm_security {
+	u32 shmid;
 };
 
 
