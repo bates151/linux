@@ -687,6 +687,28 @@ static int hifi_inode_unlink(struct inode *dir, struct dentry *dentry)
 	return 0;
 }
 
+static int hifi_inode_readlink(struct dentry *dentry)
+{
+	const struct cred_security *cursec = current_security();
+	const struct sb_security *sbs;
+	struct provmsg_readlink *msg;
+
+	msg = kmalloc(sizeof(*msg), GFP_KERNEL);
+	if (!msg)
+		return -ENOMEM;
+
+	msg->header.msgtype = PROVMSG_READLINK;
+	msg->header.cred_id = cursec->csid;
+
+	sbs = dentry->d_sb->s_security;
+	memcpy(msg->inode.sb_uuid, sbs->uuid, sizeof(msg->inode.sb_uuid));
+	msg->inode.ino = dentry->d_inode->i_ino;
+
+	write_to_relay(msg, sizeof(*msg));
+	kfree(msg);
+	return 0;
+}
+
 static int hifi_inode_rename(struct inode *old_dir, struct dentry *old_dentry,
 		struct inode *new_dir, struct dentry *new_dentry)
 {
@@ -893,14 +915,14 @@ static int hifi_shm_shmat(struct shmid_kernel *shp, char __user *shmaddr,
 {
 	const struct cred_security *cursec = current_security();
 	const struct shm_security *shmsec = shp->shm_perm.security;
-	struct provmsg_shmat logmsg;
+	struct provmsg_shmat msg;
 
-	logmsg.header.msgtype = PROVMSG_SHMAT;
-	logmsg.header.cred_id = cursec->csid;
-	logmsg.shmid = shmsec->shmid;
-	logmsg.flags = shmflg;
+	msg.header.msgtype = PROVMSG_SHMAT;
+	msg.header.cred_id = cursec->csid;
+	msg.shmid = shmsec->shmid;
+	msg.flags = shmflg;
 
-	write_to_relay(&logmsg, sizeof(logmsg));
+	write_to_relay(&msg, sizeof(msg));
 	return 0;
 }
 
@@ -1002,6 +1024,7 @@ struct security_operations hifi_security_ops = {
 
 	HANDLE(inode_link),
 	HANDLE(inode_unlink),
+	HANDLE(inode_readlink),
 	HANDLE(inode_rename),
 	HANDLE(inode_setattr),
 
