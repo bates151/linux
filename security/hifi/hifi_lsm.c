@@ -2,10 +2,6 @@
  *  Hi-Fi
  *
  *  Monitors provenance at the LSM layer.
- *
- *  TODO:
- *   - Convert the csid management system to something more PID-like (e.g.
- *     used/free bit array).
  */
 
 #include <linux/kernel.h>
@@ -42,7 +38,22 @@
 
 
 MODULE_AUTHOR("Devin J. Pohly");
+MODULE_DESCRIPTION("High-fidelity provenance monitor");
 MODULE_LICENSE("GPL");
+
+
+int bufs = 32;
+int log_buf_size = 20;
+int boot_buf_size = 1024;
+
+module_param(bufs, int, 0);
+module_param(log_buf_size, int, 0);
+module_param(boot_buf_size, int, 0);
+
+MODULE_PARM_DESC(bufs, "Number of relay sub-buffers for provenance data (default: 32)");
+MODULE_PARM_DESC(log_buf_size, "Log base 2 of sub-buffer size (default: 20=1MiB");
+MODULE_PARM_DESC(boot_buf_size, "Size of temporary boot buffer (default: 1024)");
+
 
 #define BITS_PER_PAGE (PAGE_SIZE*8)
 #define BITS_PER_PAGE_MASK (BITS_PER_PAGE-1)
@@ -56,11 +67,8 @@ static void *provid_page[PROVID_MAP_PAGES] = {
 };
 static int provid_last = -1;
 
-#define BOOT_BUFFER_SIZE (1 << 10)
 static char *boot_buffer;
 static unsigned boot_bytes = 0;
-#define RELAY_TOTAL_SIZE (32 << 20)
-#define NUM_RELAYS 32
 static struct rchan *relay;
 static DEFINE_SPINLOCK(relay_lock);
 
@@ -94,7 +102,7 @@ static void write_to_relay(const void *data, size_t length)
 	unsigned long flags;
 	spin_lock_irqsave(&relay_lock, flags);
 	if (unlikely(!relay)) {
-		if (boot_bytes + length > BOOT_BUFFER_SIZE)
+		if (boot_bytes + length > boot_buf_size)
 			panic("Hi-Fi: Boot buffer overrun");
 		memcpy(boot_buffer + boot_bytes, data, length);
 		boot_bytes += length;
@@ -119,8 +127,8 @@ static const struct provmsg_setid init_setidmsg = {
 /* Sets up the relay */
 static void init_relay(void)
 {
-	relay = relay_open("provenance", NULL, (RELAY_TOTAL_SIZE / NUM_RELAYS),
-			NUM_RELAYS, &relay_callbacks, NULL);
+	relay = relay_open("provenance", NULL, (1 << log_buf_size),
+			bufs, &relay_callbacks, NULL);
 	if (!relay)
 		panic("Hi-Fi: Could not create relay");
 	write_to_relay(&init_bootmsg, sizeof(init_bootmsg));
@@ -1056,7 +1064,7 @@ static int __init hifi_init(void)
 	}
 	printk(KERN_INFO "Hi-Fi: module enabled\n");
 
-	boot_buffer = kmalloc(BOOT_BUFFER_SIZE, GFP_KERNEL);
+	boot_buffer = kmalloc(boot_buf_size, GFP_KERNEL);
 	rv = init_provid_map();
 	if (rv)
 		return rv;
