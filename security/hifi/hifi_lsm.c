@@ -91,9 +91,19 @@ static int relay_remove_file(struct dentry *dentry)
 	return 0;
 }
 
+static int relay_subbuf_start(struct rchan_buf *buf, void *subbuf,
+		void *prev_subbuf, size_t prev_padding)
+{
+	// Prevent loss of provenance data
+	if (relay_buf_full(buf))
+		panic("Hi-Fi: no space left in relay!");
+	return 1;
+}
+
 static struct rchan_callbacks relay_callbacks = {
 	.create_buf_file = relay_create_file,
-	.remove_buf_file = relay_remove_file
+	.remove_buf_file = relay_remove_file,
+	.subbuf_start = relay_subbuf_start
 };
 
 /* Writes to the relay */
