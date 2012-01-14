@@ -46,6 +46,8 @@ enum {
 	PROVMSG_MQRECV,
 	PROVMSG_SHMAT,
 	PROVMSG_READLINK,
+	PROVMSG_UNIXSEND,
+	PROVMSG_UNIXRECV,
 
 	NUM_PROVMSG_TYPES
 };
@@ -145,6 +147,14 @@ struct provmsg_shmat {
 	uint32_t flags;
 } __attribute__((packed));
 struct provmsg_readlink {
+	struct provmsg_hdr header;
+	struct sb_inode inode;
+} __attribute__((packed));
+struct provmsg_unixsend {
+	struct provmsg_hdr header;
+	struct sb_inode inode;
+} __attribute__((packed));
+struct provmsg_unixrecv {
 	struct provmsg_hdr header;
 	struct sb_inode inode;
 } __attribute__((packed));

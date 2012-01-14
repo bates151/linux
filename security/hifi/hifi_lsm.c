@@ -33,6 +33,11 @@
 #include <linux/relay.h>
 #include <linux/spinlock.h>
 
+/* for UNIX domain sockets */
+#include <linux/net.h>
+#include <net/sock.h>
+#include <net/af_unix.h>
+
 #include "hifi.h"
 #include "hifi_proto.h"
 
@@ -998,6 +1003,92 @@ static int hifi_msg_queue_msgrcv(struct msg_queue *msq, struct msg_msg *msg,
 
 
 /*
+ * UNIX domain sockets
+ */
+static int hifi_unix_may_send(struct socket *sock, struct socket *other)
+{
+	const struct cred_security *cursec = current_security();
+	struct sb_security *sbs;
+	struct provmsg_unixsend msg;
+
+	/* Only use this function for connectionless sockets */
+	if (sock->sk->sk_family != AF_UNIX || sock->sk->sk_type != SOCK_DGRAM)
+		return 0;
+
+	msg.header.msgtype = PROVMSG_UNIXSEND;
+	msg.header.cred_id = cursec->csid;
+
+	sbs = SOCK_INODE(other)->i_sb->s_security;
+	memcpy(msg.inode.sb_uuid, sbs->uuid, sizeof(msg.inode.sb_uuid));
+	msg.inode.ino = SOCK_INODE(other)->i_ino;
+
+	write_to_relay(&msg, sizeof(msg));
+	return 0;
+}
+
+static int hifi_socket_sendmsg(struct socket *sock, struct msghdr *msg,
+		int size)
+{
+	const struct cred_security *cursec = current_security();
+	struct sock *peer;
+	struct socket *peersock;
+	struct sb_security *sbs;
+	struct provmsg_unixsend logmsg;
+
+	/* Only use this function for connection-mode sockets */
+	if (sock->sk->sk_family != AF_UNIX || sock->sk->sk_type == SOCK_DGRAM)
+		return 0;
+
+	peer = unix_sk(sock->sk)->peer;
+	/* Socket is not connected.  Will return with ENOTCONN. */
+	if (!peer)
+		return 0;
+
+	peersock = peer->sk_socket;
+	/* XXX Why does this happen three times in kernel startup, all with
+	 * SOCK_SEQPACKET?  It appears that a legitimate message is sent, so we
+	 * need to figure out how to either get the peer inode or wait for the
+	 * peer to be fully initialized.  Something.
+	 */
+	if (!peersock) {
+		printk(KERN_WARNING "Socket send before peer is inited\n");
+		return 0;
+	}
+
+	logmsg.header.msgtype = PROVMSG_UNIXSEND;
+	logmsg.header.cred_id = cursec->csid;
+
+	sbs = SOCK_INODE(peersock)->i_sb->s_security;
+	memcpy(logmsg.inode.sb_uuid, sbs->uuid, sizeof(logmsg.inode.sb_uuid));
+	logmsg.inode.ino = SOCK_INODE(peersock)->i_ino;
+
+	write_to_relay(&logmsg, sizeof(logmsg));
+	return 0;
+}
+
+static int hifi_socket_recvmsg(struct socket *sock, struct msghdr *msg,
+		int size, int flags)
+{
+	const struct cred_security *cursec = current_security();
+	struct sb_security *sbs;
+	struct provmsg_unixrecv logmsg;
+
+	if (sock->sk->sk_family != AF_UNIX)
+		return 0;
+
+	logmsg.header.msgtype = PROVMSG_UNIXRECV;
+	logmsg.header.cred_id = cursec->csid;
+
+	sbs = SOCK_INODE(sock)->i_sb->s_security;
+	memcpy(logmsg.inode.sb_uuid, sbs->uuid, sizeof(logmsg.inode.sb_uuid));
+	logmsg.inode.ino = SOCK_INODE(sock)->i_ino;
+
+	write_to_relay(&logmsg, sizeof(logmsg));
+	return 0;
+}
+
+
+/*
  * Initialization functions and structures
  */
 static int set_init_creds(void)
@@ -1028,6 +1119,10 @@ out_nomem:
 struct security_operations hifi_security_ops = {
 	.name    = "hifi",
 	HANDLE(socket_create),
+
+	HANDLE(unix_may_send),
+	HANDLE(socket_sendmsg),
+	HANDLE(socket_recvmsg),
 
 	HANDLE(sb_alloc_security),
 	HANDLE(sb_free_security),
