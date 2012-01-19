@@ -893,6 +893,12 @@ static inline void security_free_mnt_opts(struct security_mnt_opts *opts)
  *	@size contains the size of message structure.
  *	@flags contains the operational flags.
  *	Return 0 if permission is granted.
+ * @socket_post_recvmsg:
+ *      Take action before returning a message to the caller.
+ *	@sock contains the socket structure.
+ *	@msg contains the message structure.
+ *	@size contains the size of message structure.
+ *	@flags contains the operational flags.
  * @socket_getsockname:
  *	Check permission before the local address (name) of the socket object
  *	@sock is retrieved.
@@ -1592,6 +1598,8 @@ struct security_operations {
 	int (*socket_sendmsg) (struct socket *sock,
 			       struct msghdr *msg, int size);
 	int (*socket_recvmsg) (struct socket *sock,
+			       struct msghdr *msg, int size, int flags);
+	void (*socket_post_recvmsg) (struct socket *sock,
 			       struct msghdr *msg, int size, int flags);
 	int (*socket_getsockname) (struct socket *sock);
 	int (*socket_getpeername) (struct socket *sock);
@@ -2565,6 +2573,8 @@ int security_socket_accept(struct socket *sock, struct socket *newsock);
 int security_socket_sendmsg(struct socket *sock, struct msghdr *msg, int size);
 int security_socket_recvmsg(struct socket *sock, struct msghdr *msg,
 			    int size, int flags);
+void security_socket_post_recvmsg(struct socket *sock, struct msghdr *msg,
+			    int size, int flags);
 int security_socket_getsockname(struct socket *sock);
 int security_socket_getpeername(struct socket *sock);
 int security_socket_getsockopt(struct socket *sock, int level, int optname);
@@ -2657,6 +2667,12 @@ static inline int security_socket_recvmsg(struct socket *sock,
 					  int flags)
 {
 	return 0;
+}
+
+static inline void security_socket_recvmsg(struct socket *sock,
+					  struct msghdr *msg, int size,
+					  int flags)
+{
 }
 
 static inline int security_socket_getsockname(struct socket *sock)
