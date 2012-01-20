@@ -38,6 +38,13 @@
 #include <net/sock.h>
 #include <net/af_unix.h>
 
+/* for IP sockets */
+#include <linux/netfilter.h>
+#include <linux/netfilter_ipv4.h>
+#include <linux/ip.h>
+#include <linux/udp.h>
+#include <linux/tcp.h>
+
 #include "hifi.h"
 #include "hifi_proto.h"
 
@@ -1089,6 +1096,20 @@ static int hifi_socket_recvmsg(struct socket *sock, struct msghdr *msg,
 
 
 /*
+ * Netfilter hooks
+ */
+static unsigned int hifi_nf(unsigned int hooknum, struct sk_buff *skb,
+		const struct net_device *in, const struct net_device *out,
+		int (*okfn)(struct sk_buff *))
+{
+	if (ip_hdr(skb)->protocol == IPPROTO_UDP &&
+			ntohs(udp_hdr(skb)->dest) == 9876)
+		printk(KERN_INFO "hifi: pkt on udp/9876");
+	return NF_ACCEPT;
+}
+
+
+/*
  * Initialization functions and structures
  */
 static int set_init_creds(void)
@@ -1116,7 +1137,14 @@ out_nomem:
 	return -ENOMEM;
 }
 
-struct security_operations hifi_security_ops = {
+static struct nf_hook_ops hifi_nf_inet_hooks = {
+	.hook = hifi_nf,
+	.pf = PF_INET,
+	.hooknum = NF_INET_LOCAL_OUT,
+	.priority = NF_IP_PRI_LAST,
+};
+
+static struct security_operations hifi_security_ops = {
 	.name    = "hifi",
 	HANDLE(socket_create),
 
@@ -1184,4 +1212,12 @@ static int __init hifi_init(void)
 	return 0;
 }
 
+static int __init hifi_nf_init(void)
+{
+	if (nf_register_hook(&hifi_nf_inet_hooks))
+		panic("Hi-Fi: failed to register netfilter hooks");
+	return 0;
+}
+
 security_initcall(hifi_init);
+postcore_initcall(hifi_nf_init);
