@@ -1094,12 +1094,6 @@ int security_socket_recvmsg(struct socket *sock, struct msghdr *msg,
 	return security_ops->socket_recvmsg(sock, msg, size, flags);
 }
 
-void security_socket_post_recvmsg(struct socket *sock, struct msghdr *msg,
-			    int size, int flags)
-{
-	return security_ops->socket_post_recvmsg(sock, msg, size, flags);
-}
-
 int security_socket_getsockname(struct socket *sock)
 {
 	return security_ops->socket_getsockname(sock);
