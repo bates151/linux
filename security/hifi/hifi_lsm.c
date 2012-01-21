@@ -1099,7 +1099,42 @@ static int hifi_socket_recvmsg(struct socket *sock, struct msghdr *msg,
 /*
  * Netfilter hooks
  */
-static unsigned int hifi_nf(unsigned int hooknum, struct sk_buff *skb,
+static unsigned int hifi_ipv4_in(unsigned int hooknum, struct sk_buff *skb,
+		const struct net_device *in, const struct net_device *out,
+		int (*okfn)(struct sk_buff *))
+{
+	struct iphdr *iph;
+	u8 *opts;
+	int optlen, ofs;
+
+	/* XXX Only UDP for testing */
+	iph = ip_hdr(skb);
+	if (iph->protocol != IPPROTO_UDP)
+		return NF_ACCEPT;
+
+	opts = (u8 *)(iph + 1);
+	optlen = (iph->ihl - 5) << 2;
+	ofs = 0;
+	while (ofs < optlen)
+		switch (opts[ofs]) {
+			case 158:
+				printk(KERN_INFO "opt = %hu\n",
+						ntohs(*((u16*)(opts+ofs+2))));
+				/* fall through */
+			case IPOPT_END:
+				return NF_ACCEPT;
+			case IPOPT_NOOP:
+				ofs++;
+				break;
+			default:
+				ofs += opts[ofs+1];
+				break;
+		}
+
+	return NF_ACCEPT;
+}
+
+static unsigned int hifi_ipv4_out(unsigned int hooknum, struct sk_buff *skb,
 		const struct net_device *in, const struct net_device *out,
 		int (*okfn)(struct sk_buff *))
 {
@@ -1109,18 +1144,21 @@ static unsigned int hifi_nf(unsigned int hooknum, struct sk_buff *skb,
 	static const u32 id_optlen = 4;
 	unsigned char buf[id_optlen];
 
-	/* Only UDP, for testing */
-	if (ip_hdr(skb)->protocol != IPPROTO_UDP)
+	BUILD_BUG_ON(id_optlen > 40);
+
+	/* XXX Only UDP, for testing */
+	iph = ip_hdr(skb);
+	if (iph->protocol != IPPROTO_UDP)
 		return NF_ACCEPT;
 
+	/* Update in-core options structure */
 	opt = &IPCB(skb)->opt;
-
 	if (opt->optlen + id_optlen <= 40) {
-		/* Fits in the header */
+		/* Option will fit in the header */
 		len_delta = id_optlen;
 		opt->optlen += id_optlen;
 	} else {
-		/* Overwrite other options */
+		/* Option won't fit - erase the others */
 		len_delta = id_optlen - opt->optlen;
 		if (opt->optlen > 0)
 			memset(opt, 0, sizeof(*opt));
@@ -1128,7 +1166,7 @@ static unsigned int hifi_nf(unsigned int hooknum, struct sk_buff *skb,
 	}
 	opt->is_changed = 1;
 
-	iph = ip_hdr(skb);
+	/* Update the packet itself */
 	if (len_delta > 0) {
 		/* Expanding case */
 		rv = skb_cow(skb, skb_headroom(skb) + len_delta);
@@ -1137,10 +1175,6 @@ static unsigned int hifi_nf(unsigned int hooknum, struct sk_buff *skb,
 			return rv;
 		skb_push(skb, len_delta);
 
-		if (ntohs(udp_hdr(skb)->dest) == 9876)
-			printk(KERN_INFO "memmove(%p, %p, %lu)\n",
-					(char *) iph - len_delta, iph,
-					sizeof(*iph));
 		memmove((char *)iph - len_delta, iph, sizeof(*iph));
 		skb_reset_network_header(skb);
 		iph = ip_hdr(skb);
@@ -1192,8 +1226,15 @@ out_nomem:
 	return -ENOMEM;
 }
 
-static struct nf_hook_ops hifi_nf_inet_hooks = {
-	.hook = hifi_nf,
+static struct nf_hook_ops hifi_ipv4_in_hook = {
+	.hook = hifi_ipv4_in,
+	.pf = PF_INET,
+	.hooknum = NF_INET_LOCAL_IN,
+	.priority = NF_IP_PRI_FIRST,
+};
+
+static struct nf_hook_ops hifi_ipv4_out_hook = {
+	.hook = hifi_ipv4_out,
 	.pf = PF_INET,
 	.hooknum = NF_INET_LOCAL_OUT,
 	.priority = NF_IP_PRI_LAST,
@@ -1269,7 +1310,8 @@ static int __init hifi_init(void)
 
 static int __init hifi_nf_init(void)
 {
-	if (nf_register_hook(&hifi_nf_inet_hooks))
+	if (nf_register_hook(&hifi_ipv4_in_hook) ||
+			nf_register_hook(&hifi_ipv4_out_hook))
 		panic("Hi-Fi: failed to register netfilter hooks");
 	return 0;
 }
