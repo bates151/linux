@@ -42,6 +42,7 @@
 #include <linux/netfilter.h>
 #include <linux/netfilter_ipv4.h>
 #include <linux/ip.h>
+#include <net/ip.h>
 #include <linux/udp.h>
 #include <linux/tcp.h>
 
@@ -1102,9 +1103,63 @@ static unsigned int hifi_nf(unsigned int hooknum, struct sk_buff *skb,
 		const struct net_device *in, const struct net_device *out,
 		int (*okfn)(struct sk_buff *))
 {
-	if (ip_hdr(skb)->protocol == IPPROTO_UDP &&
-			ntohs(udp_hdr(skb)->dest) == 9876)
-		printk(KERN_INFO "hifi: pkt on udp/9876");
+	struct ip_options *opt;
+	struct iphdr *iph;
+	int len_delta, rv;
+	static const u32 id_optlen = 4;
+	unsigned char buf[id_optlen];
+
+	/* Only UDP, for testing */
+	if (ip_hdr(skb)->protocol != IPPROTO_UDP)
+		return NF_ACCEPT;
+
+	opt = &IPCB(skb)->opt;
+
+	if (opt->optlen + id_optlen <= 40) {
+		/* Fits in the header */
+		len_delta = id_optlen;
+		opt->optlen += id_optlen;
+	} else {
+		/* Overwrite other options */
+		len_delta = id_optlen - opt->optlen;
+		if (opt->optlen > 0)
+			memset(opt, 0, sizeof(*opt));
+		opt->optlen = id_optlen;
+	}
+	opt->is_changed = 1;
+
+	iph = ip_hdr(skb);
+	if (len_delta > 0) {
+		/* Expanding case */
+		rv = skb_cow(skb, skb_headroom(skb) + len_delta);
+		iph = ip_hdr(skb);
+		if (rv < 0)
+			return rv;
+		skb_push(skb, len_delta);
+
+		if (ntohs(udp_hdr(skb)->dest) == 9876)
+			printk(KERN_INFO "memmove(%p, %p, %lu)\n",
+					(char *) iph - len_delta, iph,
+					sizeof(*iph));
+		memmove((char *)iph - len_delta, iph, sizeof(*iph));
+		skb_reset_network_header(skb);
+		iph = ip_hdr(skb);
+
+		iph->ihl = 5 + (opt->optlen >> 2);
+		iph->tot_len = htons(skb->len);
+	} else if (len_delta < 0) {
+		/* Nopping case */
+		opt->optlen += -len_delta;
+		memset(((char *)(iph + 1)) + id_optlen, IPOPT_NOP,
+				-len_delta);
+	}
+
+	buf[0] = 158;
+	buf[1] = 4;
+	*((u16 *) &buf[2]) = udp_hdr(skb)->dest;
+	memcpy(iph + 1, buf, 4);
+	ip_send_check(iph);
+
 	return NF_ACCEPT;
 }
 
