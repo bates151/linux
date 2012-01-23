@@ -926,6 +926,12 @@ int pskb_expand_head(struct sk_buff *skb, int nhead, int ntail,
 	if (fastpath) {
 		kfree(skb->head);
 	} else {
+		/* Data in skb is being copied without freeing old one */
+		if (security_skb_shinfo_copy(skb,
+				(struct skb_shared_info *)(data + size),
+				gfp_mask))
+			goto nofrags;
+
 		/* copy this zero copy skb frags */
 		if (skb_shinfo(skb)->tx_flags & SKBTX_DEV_ZEROCOPY) {
 			if (skb_copy_ubufs(skb, gfp_mask))

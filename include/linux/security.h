@@ -37,6 +37,7 @@
 #include <linux/xfrm.h>
 #include <linux/slab.h>
 #include <linux/xattr.h>
+#include <linux/skbuff.h>
 #include <net/flow.h>
 
 /* Maximum number of letters for an LSM name string */
@@ -931,32 +932,40 @@ static inline void security_free_mnt_opts(struct security_mnt_opts *opts)
  *	@sk contains the sock (not socket) associated with the incoming sk_buff.
  *	@skb contains the incoming network data.
  * @skb_shinfo_alloc_security:
- * 	Allocate and attach a security structure to the skb_shared_info
- * 	structure associated with a socket buffer.
- * 	@skb contains the socket buffer structure.
- * 	@recycling is 1 if the buffer is being recycled (i.e. not freed and
- * 	re-allocated).  If possible, the structure should be initialized without
- * 	allocating memory in this case.  This will always follow a corresponding
- * 	free_security call with recycling set to 1.
+ *	Allocate and attach a security structure to the skb_shared_info
+ *	structure associated with a socket buffer.
+ *	@skb contains the socket buffer structure.
+ *	@recycling is 1 if the buffer is being recycled (i.e. not freed and
+ *	re-allocated).  If possible, the structure should be initialized without
+ *	allocating memory in this case.  This will always follow a corresponding
+ *	free_security call with recycling set to 1.
  *	@gfp indicates the atomicity of any memory allocations.
  * @skb_shinfo_free_security:
- * 	Deallocate the security structure attached to the skb_shared_info
- * 	associated with a socket buffer.  Note that this may be called more than
- * 	once if the shinfo allocate hook fails, so be sure to check the pointer
- * 	before freeing, and set it to NULL afterward.
+ *	Deallocate the security structure attached to the skb_shared_info
+ *	associated with a socket buffer.  Note that this may be called more than
+ *	once if the shinfo allocate hook fails, so be sure to check the pointer
+ *	before freeing, and set it to NULL afterward.
  *	@skb contains the socket buffer structure.
  *	@recycling is 1 if the buffer is being recycled.  If possible, the
  *	structure should be deinitialized without freeing memory in this case.
  *	This will always be followed by a corresponding alloc_security call with
  *	recycling set to 1.
+ * @skb_shinfo_copy:
+ *	Notifies the security module that a copy (not a clone) of the buffer and
+ *	shared info structure is being made.  By default, the copy will have the
+ *	same security pointer as the original, but there are now two references
+ *	to it which can be legally passed to the shinfo free hook.
+ *	@skb contains the original socket buffer structure.
+ *	@shinfo contains the new shared info structure.
+ *	@gfp indicates the atomicity of any memory allocations.
  * @reqsk_alloc_security:
- * 	Allocate and attach a security structure to a connection request
- * 	mini-socket.  Allocation should use GFP_ATOMIC.
- * 	@req contains the mini-socket.
+ *	Allocate and attach a security structure to a connection request
+ *	mini-socket.  Allocation should use GFP_ATOMIC.
+ *	@req contains the mini-socket.
  * @reqsk_free_security:
- * 	Deallocate the security structure attached to a connection request
- * 	mini-socket.
- * 	@req contains the mini-socket.
+ *	Deallocate the security structure attached to a connection request
+ *	mini-socket.
+ *	@req contains the mini-socket.
  * @socket_getpeersec_stream:
  *	This hook allows the security module to provide peer socket security
  *	state for unix or connected tcp sockets to userspace via getsockopt
@@ -1629,6 +1638,8 @@ struct security_operations {
 	int (*skb_shinfo_alloc_security) (struct sk_buff *skb, int recycling,
 			gfp_t gfp);
 	void (*skb_shinfo_free_security) (struct sk_buff *skb, int recycling);
+	int (*skb_shinfo_copy) (struct sk_buff *skb,
+			struct skb_shared_info *shinfo, gfp_t gfp);
 	int (*reqsk_alloc_security) (struct request_sock *req);
 	void (*reqsk_free_security) (struct request_sock *req);
 	int (*socket_getpeersec_stream) (struct socket *sock, char __user *optval, int __user *optlen, unsigned len);
@@ -2605,6 +2616,8 @@ int security_socket_shutdown(struct socket *sock, int how);
 int security_sock_rcv_skb(struct sock *sk, struct sk_buff *skb);
 int security_skb_shinfo_alloc(struct sk_buff *skb, int recycling, gfp_t gfp);
 void security_skb_shinfo_free(struct sk_buff *skb, int recycling);
+int security_skb_shinfo_copy(struct sk_buff *skb, struct skb_shared_info *shinfo,
+		gfp_t gfp);
 int security_reqsk_alloc(struct request_sock *req);
 void security_reqsk_free(struct request_sock *req);
 int security_socket_getpeersec_stream(struct socket *sock, char __user *optval,
@@ -2735,6 +2748,12 @@ static inline int security_skb_shinfo_alloc(struct sk_buff *skb, int recycling,
 
 static inline void security_skb_shinfo_free(struct sk_buff *skb, int recycling)
 {
+}
+
+static inline int security_skb_shinfo_copy(struct sk_buff *skb,
+		struct skb_shared_info *shinfo, gfp_t gfp)
+{
+	return 0;
 }
 
 static inline int security_reqsk_alloc(struct request_sock *req)

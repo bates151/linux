@@ -644,6 +644,12 @@ static void cap_skb_shinfo_free_security(struct sk_buff *skb, int recycling)
 {
 }
 
+static int cap_skb_shinfo_copy(struct sk_buff *skb,
+		struct skb_shared_info *shinfo, gfp_t gfp)
+{
+	return 0;
+}
+
 static int cap_reqsk_alloc_security(struct request_sock *req)
 {
 	return 0;
@@ -1047,6 +1053,7 @@ void __init security_fixup_ops(struct security_operations *ops)
 	set_to_cap_if_null(ops, socket_sock_rcv_skb);
 	set_to_cap_if_null(ops, skb_shinfo_alloc_security);
 	set_to_cap_if_null(ops, skb_shinfo_free_security);
+	set_to_cap_if_null(ops, skb_shinfo_copy);
 	set_to_cap_if_null(ops, reqsk_alloc_security);
 	set_to_cap_if_null(ops, reqsk_free_security);
 	set_to_cap_if_null(ops, socket_getpeersec_stream);

@@ -1135,6 +1135,12 @@ void security_skb_shinfo_free(struct sk_buff *skb, int recycling)
 	security_ops->skb_shinfo_free_security(skb, recycling);
 }
 
+int security_skb_shinfo_copy(struct sk_buff *skb,
+		struct skb_shared_info *shinfo, gfp_t gfp)
+{
+	return security_ops->skb_shinfo_copy(skb, shinfo, gfp);
+}
+
 int security_reqsk_alloc(struct request_sock *req)
 {
 	return security_ops->reqsk_alloc_security(req);
