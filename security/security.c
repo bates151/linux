@@ -1125,6 +1125,16 @@ int security_sock_rcv_skb(struct sock *sk, struct sk_buff *skb)
 }
 EXPORT_SYMBOL(security_sock_rcv_skb);
 
+int security_skb_shinfo_alloc(struct sk_buff *skb, int recycling, gfp_t gfp)
+{
+	return security_ops->skb_shinfo_alloc_security(skb, recycling, gfp);
+}
+
+void security_skb_shinfo_free(struct sk_buff *skb, int recycling)
+{
+	security_ops->skb_shinfo_free_security(skb, recycling);
+}
+
 int security_socket_getpeersec_stream(struct socket *sock, char __user *optval,
 				      int __user *optlen, unsigned len)
 {

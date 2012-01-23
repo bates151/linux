@@ -930,6 +930,25 @@ static inline void security_free_mnt_opts(struct security_mnt_opts *opts)
  *	Must not sleep inside this hook because some callers hold spinlocks.
  *	@sk contains the sock (not socket) associated with the incoming sk_buff.
  *	@skb contains the incoming network data.
+ * @skb_shinfo_alloc_security:
+ * 	Allocate and attach a security structure to the skb_shared_info
+ * 	structure associated with a socket buffer.
+ * 	@skb contains the socket buffer structure.
+ * 	@recycling is 1 if the buffer is being recycled (i.e. not freed and
+ * 	re-allocated).  If possible, the structure should be initialized without
+ * 	allocating memory in this case.  This will always follow a corresponding
+ * 	free_security call with recycling set to 1.
+ *	@gfp indicates the atomicity of any memory allocations.
+ * @skb_shinfo_free_security:
+ * 	Deallocate the security structure attached to the skb_shared_info
+ * 	associated with a socket buffer.  Note that this may be called more than
+ * 	once if the shinfo allocate hook fails, so be sure to check the pointer
+ * 	before freeing, and set it to NULL afterward.
+ *	@skb contains the socket buffer structure.
+ *	@recycling is 1 if the buffer is being recycled.  If possible, the
+ *	structure should be deinitialized without freeing memory in this case.
+ *	This will always be followed by a corresponding alloc_security call with
+ *	recycling set to 1.
  * @socket_getpeersec_stream:
  *	This hook allows the security module to provide peer socket security
  *	state for unix or connected tcp sockets to userspace via getsockopt
@@ -1599,6 +1618,9 @@ struct security_operations {
 	int (*socket_setsockopt) (struct socket *sock, int level, int optname);
 	int (*socket_shutdown) (struct socket *sock, int how);
 	int (*socket_sock_rcv_skb) (struct sock *sk, struct sk_buff *skb);
+	int (*skb_shinfo_alloc_security) (struct sk_buff *skb, int recycling,
+			gfp_t gfp);
+	void (*skb_shinfo_free_security) (struct sk_buff *skb, int recycling);
 	int (*socket_getpeersec_stream) (struct socket *sock, char __user *optval, int __user *optlen, unsigned len);
 	int (*socket_getpeersec_dgram) (struct socket *sock, struct sk_buff *skb, u32 *secid);
 	int (*sk_alloc_security) (struct sock *sk, int family, gfp_t priority);
@@ -2571,6 +2593,8 @@ int security_socket_getsockopt(struct socket *sock, int level, int optname);
 int security_socket_setsockopt(struct socket *sock, int level, int optname);
 int security_socket_shutdown(struct socket *sock, int how);
 int security_sock_rcv_skb(struct sock *sk, struct sk_buff *skb);
+int security_skb_shinfo_alloc(struct sk_buff *skb, int recycling, gfp_t gfp);
+void security_skb_shinfo_free(struct sk_buff *skb, int recycling);
 int security_socket_getpeersec_stream(struct socket *sock, char __user *optval,
 				      int __user *optlen, unsigned len);
 int security_socket_getpeersec_dgram(struct socket *sock, struct sk_buff *skb, u32 *secid);
@@ -2689,6 +2713,16 @@ static inline int security_sock_rcv_skb(struct sock *sk,
 					struct sk_buff *skb)
 {
 	return 0;
+}
+
+static inline int security_skb_shinfo_alloc(struct sk_buff *skb, int recycling,
+		gfp_t gfp)
+{
+	return 0;
+}
+
+static inline void security_skb_shinfo_free(struct sk_buff *skb, int recycling)
+{
 }
 
 static inline int security_socket_getpeersec_stream(struct socket *sock, char __user *optval,

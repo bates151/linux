@@ -41,6 +41,7 @@
 #include <linux/kernel.h>
 #include <linux/kmemcheck.h>
 #include <linux/mm.h>
+#include <linux/security.h>
 #include <linux/interrupt.h>
 #include <linux/in.h>
 #include <linux/inet.h>
@@ -223,6 +224,8 @@ struct sk_buff *__alloc_skb(unsigned int size, gfp_t gfp_mask,
 	memset(shinfo, 0, offsetof(struct skb_shared_info, dataref));
 	atomic_set(&shinfo->dataref, 1);
 	kmemcheck_annotate_variable(shinfo->destructor_arg);
+	if (security_skb_shinfo_alloc(skb, 0, gfp_mask))
+		goto nosec;
 
 	if (fclone) {
 		struct sk_buff *child = skb + 1;
@@ -237,6 +240,8 @@ struct sk_buff *__alloc_skb(unsigned int size, gfp_t gfp_mask,
 	}
 out:
 	return skb;
+nosec:
+	kfree(data);
 nodata:
 	kmem_cache_free(cache, skb);
 	skb = NULL;
@@ -424,6 +429,7 @@ static void skb_release_head_state(struct sk_buff *skb)
 /* Free everything but the sk_buff shell. */
 static void skb_release_all(struct sk_buff *skb)
 {
+	security_skb_shinfo_free(skb, 0);
 	skb_release_head_state(skb);
 	skb_release_data(skb);
 }
@@ -526,9 +532,10 @@ bool skb_recycle_check(struct sk_buff *skb, int skb_size)
 	if (!skb_is_recycleable(skb, skb_size))
 		return false;
 
+	security_skb_shinfo_free(skb, 1);
 	skb_recycle(skb);
 
-	return true;
+	return !security_skb_shinfo_alloc(skb, 1, GFP_ATOMIC);
 }
 EXPORT_SYMBOL(skb_recycle_check);
 
