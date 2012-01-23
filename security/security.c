@@ -1135,6 +1135,18 @@ void security_skb_shinfo_free(struct sk_buff *skb, int recycling)
 	security_ops->skb_shinfo_free_security(skb, recycling);
 }
 
+int security_reqsk_alloc(struct request_sock *req)
+{
+	return security_ops->reqsk_alloc_security(req);
+}
+EXPORT_SYMBOL(security_reqsk_alloc);
+
+void security_reqsk_free(struct request_sock *req)
+{
+	security_ops->reqsk_free_security(req);
+}
+EXPORT_SYMBOL(security_reqsk_free);
+
 int security_socket_getpeersec_stream(struct socket *sock, char __user *optval,
 				      int __user *optlen, unsigned len)
 {
