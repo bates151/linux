@@ -220,6 +220,94 @@ out_unmap:
 
 
 /*
+ * Packet marking helper functions
+ */
+static int get_packet_label(const struct sk_buff *skb, struct sockid *label)
+{
+	struct iphdr *iph = ip_hdr(skb);
+	u8 *p, *end;
+
+	p = (u8 *)(iph + 1);
+	end = p + ((iph->ihl - 5) << 2);
+	while (p < end)
+		switch (*p) {
+			case IPOPT_HIFI:
+				memcpy(label, p + 2, sizeof(*label));
+				return 0;
+			case IPOPT_END:
+				return -1;
+			case IPOPT_NOOP:
+				p++;
+				continue;
+			default:
+				p += *(p + 1);
+				continue;
+		}
+	return -1;
+}
+
+static int label_packet(struct sk_buff *skb, const struct sockid *label)
+{
+	struct iphdr *iph;
+	struct ip_options *opt;
+	int len_delta, rv;
+	struct sockid_opt *ipopt;
+
+	/* Gotta fit in 320 bits */
+	BUILD_BUG_ON(sizeof(*ipopt) > MAX_IPOPTLEN);
+
+	/* Update in-core options structure */
+	opt = &IPCB(skb)->opt;
+	if (opt->optlen + sizeof(*ipopt) <= MAX_IPOPTLEN) {
+		/* Option will fit in the header */
+		len_delta = sizeof(*ipopt);
+		opt->optlen += sizeof(*ipopt);
+	} else {
+		/* Option won't fit - erase the others */
+		printk(KERN_WARNING "Hi-Fi: erasing packet options!\n");
+		len_delta = sizeof(*ipopt) - opt->optlen;
+		if (opt->optlen > 0)
+			memset(opt, 0, sizeof(*opt));
+		opt->optlen = sizeof(*ipopt);
+	}
+
+	/* Update the packet itself */
+	rv = skb_cow(skb, skb_headroom(skb) + len_delta);
+	if (rv < 0)
+		return rv;
+	iph = ip_hdr(skb);
+	if (len_delta > 0) {
+		/* Expanding case */
+		skb_push(skb, len_delta);
+
+		memmove((char *)iph - len_delta, iph, sizeof(*iph));
+		skb_reset_network_header(skb);
+		iph = ip_hdr(skb);
+
+		iph->ihl = 5 + (opt->optlen >> 2);
+		iph->tot_len = htons(skb->len);
+	}
+
+	ipopt = (struct sockid_opt *)(iph + 1);
+	ipopt->num = IPOPT_HIFI;
+	ipopt->len = sizeof(ipopt);
+	ipopt->label = *label;
+
+	if (len_delta < 0) {
+		/* Nopping case */
+		opt->optlen += -len_delta;
+		memset(ipopt + 1, IPOPT_NOP, -len_delta);
+	}
+
+	/* Um, yeah, stuff changed */
+	opt->is_changed = 1;
+	ip_send_check(iph);
+
+	return 0;
+}
+
+
+/*
  * The hooks
  */
 
@@ -1102,64 +1190,17 @@ static int hifi_socket_recvmsg(struct socket *sock, struct msghdr *msg,
 /*
  * TCP hooks
  */
-static int hifi_reqsk_alloc_security(struct request_sock *req)
-{
-	struct sock_security *sec;
-
-	sec = kmalloc(sizeof(*sec), GFP_ATOMIC);
-	if (!sec)
-		return -ENOMEM;
-
-	req->security = sec;
-	return 0;
-}
-
-static void hifi_reqsk_free_security(struct request_sock *req)
-{
-	if (!req->security) {
-		printk("reqsk null!\n");
-		return;
-	}
-	kfree(req->security);
-}
+static const struct sockid test_label = {0xABCD, 0x12345678};
 
 static int hifi_socket_sock_rcv_skb(struct sock *sk, struct sk_buff *skb)
 {
-	struct iphdr *iph;
 	struct tcphdr *tcph;
-	u8 *opts;
-	int optlen, ofs;
 
-	/* XXX Only TCP SYNACK */
+	/* XXX Only TCP */
 	if (sk->sk_prot != &tcp_prot)
 		return 0;
 	tcph = tcp_hdr(skb);
-	if (tcph->syn || tcph->ack)
-		printk(KERN_INFO "rcv tcp %s%s on %hu, sk=%p\n",
-				tcph->syn ? "syn" : "", tcph->ack ? "ack" : "",
-				ntohs(tcph->dest), sk);
-
-#if 0
-	opts = (u8 *)(iph + 1);
-	optlen = (iph->ihl - 5) << 2;
-	ofs = 0;
-	while (ofs < optlen)
-		switch (opts[ofs]) {
-			case IPOPT_HIFI:
-				printk(KERN_INFO "tcp: %hu, skb->sk=%p\n",
-						ntohs(*((u16*)(opts+ofs+2))),
-						skb->sk);
-				/* fall through */
-			case IPOPT_END:
-				return NF_ACCEPT;
-			case IPOPT_NOOP:
-				ofs++;
-				break;
-			default:
-				ofs += opts[ofs+1];
-				break;
-		}
-#endif
+	printk(KERN_INFO "rcv tcp skb %p\n", skb_shinfo(skb));
 	return 0;
 }
 
@@ -1177,9 +1218,123 @@ static void hifi_inet_csk_clone(struct sock *newsk,
 	printk(KERN_INFO "clone newsk=%p\n", newsk);
 }
 
+static int tcp_in(struct sk_buff *skb)
+{
+	struct sockid label;
+
+	if (get_packet_label(skb, &label))
+		return 0;
+	// skb->sk == NULL
+	printk(KERN_INFO "incoming tcp, label=%04hx:%08x skb=%p\n",
+			ntohs(label.high), ntohl(label.low), skb_shinfo(skb));
+	return 0;
+}
+
+static int tcp_out(struct sk_buff *skb)
+{
+	//tcph = (struct tcphdr *) ((char *) iph + (iph->ihl << 2));
+	return label_packet(skb, &test_label);
+}
+
 
 /*
- * Socket buffer hooks
+ * UDP hooks
+ */
+static int udp_in(struct sk_buff *skb)
+{
+	struct sockid label;
+
+	if (get_packet_label(skb, &label))
+		return 0;
+	// skb->sk == NULL
+	printk(KERN_INFO "incoming udp, label=%04hx:%08x\n", ntohs(label.high),
+			ntohl(label.low));
+	return 0;
+}
+
+static int udp_out(struct sk_buff *skb)
+{
+	printk(KERN_INFO "outgoing udp %p", skb->sk);
+	return label_packet(skb, &test_label);
+}
+
+
+/*
+ * Netfilter hooks
+ */
+static unsigned int hifi_ipv4_in(unsigned int hooknum, struct sk_buff *skb,
+		const struct net_device *in, const struct net_device *out,
+		int (*okfn)(struct sk_buff *))
+{
+	struct iphdr *iph = ip_hdr(skb);
+
+	switch (iph->protocol) {
+	case IPPROTO_UDP:
+		if (udp_in(skb))
+			return NF_DROP;
+		break;
+	case IPPROTO_TCP:
+		if (tcp_in(skb))
+			return NF_DROP;
+		break;
+	}
+
+	return NF_ACCEPT;
+}
+
+static unsigned int hifi_ipv4_out(unsigned int hooknum, struct sk_buff *skb,
+		const struct net_device *in, const struct net_device *out,
+		int (*okfn)(struct sk_buff *))
+{
+	struct iphdr *iph;
+
+	iph = ip_hdr(skb);
+	switch (iph->protocol) {
+	case IPPROTO_UDP:
+		if (udp_out(skb))
+			return NF_DROP;
+		break;
+	case IPPROTO_TCP:
+		if (tcp_out(skb))
+			return NF_DROP;
+		break;
+	}
+
+	return NF_ACCEPT;
+}
+
+
+/*
+ * Socket allocation hooks
+ */
+static int hifi_sk_alloc_security(struct sock *sk, int family, gfp_t priority)
+{
+	struct sock_security *sec;
+
+	sec = kmalloc(sizeof(*sec), priority);
+	if (!sec)
+		return -ENOMEM;
+
+	sk->sk_security = sec;
+	return 0;
+}
+
+static void hifi_sk_free_security(struct sock *sk)
+{
+	if (!sk->sk_security)
+		return;
+	kfree(sk->sk_security);
+	sk->sk_security = NULL;
+}
+
+static void hifi_sk_clone_security(const struct sock *sk, struct sock *newsk)
+{
+	// Is already allocated
+}
+
+
+/*
+ * Socket buffer allocation hooks
  */
 static int hifi_skb_shinfo_alloc_security(struct sk_buff *skb, int recycling,
 		gfp_t gfp)
@@ -1188,30 +1343,23 @@ static int hifi_skb_shinfo_alloc_security(struct sk_buff *skb, int recycling,
 
 	if (recycling)
 		return 0;
-	skb_shinfo(skb)->security = NULL;
 
 	sec = kmalloc(sizeof(*sec), gfp);
-	if (!sec) {
-		printk(KERN_INFO "shinfo alloc failed\n");
+	if (!sec)
 		return -ENOMEM;
-	}
 
 	skb_shinfo(skb)->security = sec;
-
 	return 0;
 }
 
 static void hifi_skb_shinfo_free_security(struct sk_buff *skb, int recycling)
 {
-	struct skb_shared_info *shinfo;
-
 	if (recycling)
 		return;
 
-	shinfo = skb_shinfo(skb);
-	if (shinfo->security) {
-		kfree(shinfo->security);
-		shinfo->security = NULL;
+	if (skb_shinfo(skb)->security) {
+		kfree(skb_shinfo(skb)->security);
+		skb_shinfo(skb)->security = NULL;
 	}
 }
 
@@ -1226,209 +1374,6 @@ static int hifi_skb_shinfo_copy(struct sk_buff *skb,
 	memcpy(sec, skb_shinfo(skb)->security, sizeof(*sec));
 	shinfo->security = sec;
 	return 0;
-}
-
-
-/*
- * Packet marking helper functions
- */
-static int get_packet_label(const struct sk_buff *skb, u16 *label)
-{
-	struct iphdr *iph = ip_hdr(skb);
-	u8 *p, *end;
-
-	p = (u8 *)(iph + 1);
-	end = p + ((iph->ihl - 5) << 2);
-	while (p < end)
-		switch (*p) {
-			case IPOPT_HIFI:
-				*label = ntohs(*((u16 *) (p + 2)));
-				return 0;
-			case IPOPT_END:
-				return -1;
-			case IPOPT_NOOP:
-				p++;
-				continue;
-			default:
-				p += *(p + 1);
-				continue;
-		}
-	return -1;
-}
-
-static int label_packet(struct sk_buff *skb, u16 label)
-{
-	struct iphdr *iph;
-	struct ip_options *opt;
-	int len_delta, rv;
-	static const u32 id_optlen = 4;
-	u8 buf[id_optlen];
-
-	/* Gotta fit in 320 bits */
-	BUILD_BUG_ON(id_optlen > 40);
-
-	/* Update in-core options structure */
-	opt = &IPCB(skb)->opt; if (opt->optlen + id_optlen <= 40) {
-		/* Option will fit in the header */
-		len_delta = id_optlen;
-		opt->optlen += id_optlen;
-	} else {
-		/* Option won't fit - erase the others */
-		printk(KERN_WARNING "Hi-Fi: erasing packet options!\n");
-		len_delta = id_optlen - opt->optlen;
-		if (opt->optlen > 0)
-			memset(opt, 0, sizeof(*opt));
-		opt->optlen = id_optlen;
-	}
-	opt->is_changed = 1;
-
-	/* Update the packet itself */
-	rv = skb_cow(skb, skb_headroom(skb) + len_delta);
-	if (rv < 0)
-		return rv;
-	iph = ip_hdr(skb);
-	if (len_delta > 0) {
-		/* Expanding case */
-		skb_push(skb, len_delta);
-
-		memmove((char *)iph - len_delta, iph, sizeof(*iph));
-		skb_reset_network_header(skb);
-		iph = ip_hdr(skb);
-
-		iph->ihl = 5 + (opt->optlen >> 2);
-		iph->tot_len = htons(skb->len);
-	} else if (len_delta < 0) {
-		/* Nopping case */
-		opt->optlen += -len_delta;
-		memset(((char *)(iph + 1)) + id_optlen, IPOPT_NOP,
-				-len_delta);
-	}
-
-	buf[0] = IPOPT_HIFI;
-	buf[1] = 4;
-	*((u16 *) &buf[2]) = htons(label);
-	memcpy(iph + 1, buf, 4);
-	ip_send_check(iph);
-
-	return 0;
-}
-
-
-/*
- * Netfilter hooks
- */
-static int udp_in(struct sk_buff *skb)
-{
-	u16 label;
-
-	if (get_packet_label(skb, &label))
-		return 0;
-	// skb->sk == NULL
-	printk(KERN_INFO "incoming udp, label=%hu\n", label);
-	return 0;
-}
-
-static int tcp_syn_in(struct sk_buff *skb)
-{
-	u16 label;
-
-	if (get_packet_label(skb, &label))
-		return 0;
-	// skb->sk == NULL
-	printk(KERN_INFO "incoming syn, label=%hu\n", label);
-	return 0;
-}
-
-static int tcp_synack_in(struct sk_buff *skb)
-{
-	u16 label;
-
-	if (get_packet_label(skb, &label))
-		return 0;
-	// skb->sk == NULL
-	printk(KERN_INFO "incoming synack, label=%hu\n", label);
-	return 0;
-}
-
-static int udp_out(struct sk_buff *skb)
-{
-	printk(KERN_INFO "outgoing udp %p", skb->sk);
-	return label_packet(skb, 1234);
-}
-
-static int tcp_syn_out(struct sk_buff *skb)
-{
-	printk(KERN_INFO "outgoing syn %p\n", skb->sk);
-	return label_packet(skb, 1234);
-}
-
-static int tcp_synack_out(struct sk_buff *skb)
-{
-	struct request_sock **prev;
-	struct iphdr *iph = ip_hdr(skb);
-	struct tcphdr *th = (struct tcphdr *) ((char *) iph + (iph->ihl << 2));
-	struct request_sock *req = inet_csk_search_req(skb->sk, &prev, th->dest,
-			iph->daddr, iph->saddr);
-	if (!req)
-		printk(KERN_ERR "Hi-Fi: could not find request sock: state=%d\n",
-				skb->sk->sk_state);
-	printk(KERN_INFO "outgoing synack sk=%p req=%p\n", skb->sk, req);
-	return label_packet(skb, 1234);
-}
-
-static unsigned int hifi_ipv4_in(unsigned int hooknum, struct sk_buff *skb,
-		const struct net_device *in, const struct net_device *out,
-		int (*okfn)(struct sk_buff *))
-{
-	struct iphdr *iph = ip_hdr(skb);
-	struct tcphdr *tcph;
-
-	switch (iph->protocol) {
-	case IPPROTO_UDP:
-		if (udp_in(skb))
-			return NF_DROP;
-		break;
-	case IPPROTO_TCP:
-		tcph = (struct tcphdr *) ((char *) iph + (iph->ihl << 2));
-		if (tcph->syn && tcph->ack) {
-			if (tcp_synack_in(skb))
-				return NF_DROP;
-		} else if (tcph->syn) {
-			if (tcp_syn_in(skb))
-				return NF_DROP;
-		}
-		break;
-	}
-
-	return NF_ACCEPT;
-}
-
-static unsigned int hifi_ipv4_out(unsigned int hooknum, struct sk_buff *skb,
-		const struct net_device *in, const struct net_device *out,
-		int (*okfn)(struct sk_buff *))
-{
-	struct iphdr *iph;
-	struct tcphdr *tcph;
-
-	iph = ip_hdr(skb);
-	switch (iph->protocol) {
-	case IPPROTO_UDP:
-		if (udp_out(skb))
-			return NF_DROP;
-		break;
-	case IPPROTO_TCP:
-		tcph = (struct tcphdr *) ((char *) iph + (iph->ihl << 2));
-		if (tcph->syn && tcph->ack) {
-			if (tcp_synack_out(skb))
-				return NF_DROP;
-		} else if (tcph->syn) {
-			if (tcp_syn_out(skb))
-				return NF_DROP;
-		}
-		break;
-	}
-
-	return NF_ACCEPT;
 }
 
 
@@ -1483,8 +1428,9 @@ static struct security_operations hifi_security_ops = {
 	HANDLE(socket_sendmsg),
 	HANDLE(socket_recvmsg),
 
-	HANDLE(reqsk_alloc_security),
-	HANDLE(reqsk_free_security),
+	HANDLE(sk_alloc_security),
+	HANDLE(sk_free_security),
+	HANDLE(sk_clone_security),
 	HANDLE(skb_shinfo_alloc_security),
 	HANDLE(skb_shinfo_free_security),
 	HANDLE(skb_shinfo_copy),

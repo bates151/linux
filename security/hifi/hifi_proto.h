@@ -28,10 +28,12 @@ struct sb_inode {
 
 /* Structure referring to a receive queue on a specific system */
 struct sockid {
+	// XXX Pay attention to network-order-ness of this???
 	// XXX for now
 	//unsigned char host_uuid[16];
-	/* High 16 bits are not used */
-	uint64_t sockid;
+	/* Highest 16 bits are not used */
+	uint16_t high;
+	uint32_t low;
 } __attribute__((packed));
 
 

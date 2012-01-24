@@ -67,4 +67,12 @@ struct skb_security {
 };
 
 
+/* Label option for IP */
+struct sockid_opt {
+	u8 num;
+	u8 len;
+	struct sockid label;
+} __attribute__((packed));
+
+
 #endif
