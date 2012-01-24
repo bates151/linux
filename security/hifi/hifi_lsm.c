@@ -1133,18 +1133,13 @@ static int hifi_unix_may_send(struct socket *sock, struct socket *other)
 	return 0;
 }
 
-static int hifi_socket_sendmsg(struct socket *sock, struct msghdr *msg,
-		int size)
+static int send_unix_msg(struct socket *sock, struct msghdr *msg, int size)
 {
 	const struct cred_security *cursec = current_security();
 	struct sock *peer;
 	struct socket *peersock;
 	struct sb_security *sbs;
 	struct provmsg_unixsend logmsg;
-
-	/* Only use this function for connection-mode sockets */
-	if (sock->sk->sk_family != AF_UNIX || sock->sk->sk_type == SOCK_DGRAM)
-		return 0;
 
 	peer = unix_sk(sock->sk)->peer;
 	/* Socket is not connected.  Will return with ENOTCONN. */
@@ -1171,6 +1166,53 @@ static int hifi_socket_sendmsg(struct socket *sock, struct msghdr *msg,
 
 	write_to_relay(&logmsg, sizeof(logmsg));
 	return 0;
+}
+
+static int send_tcp_msg(struct socket *sock, struct msghdr *msg, int size)
+{
+	const struct cred_security *cursec = current_security();
+	const struct sock_security *sks = sock->sk->sk_security;
+
+	printk(KERN_INFO "tcp send 0x%x -> %04hx:%08x\n", cursec->csid,
+			sks->remote_id.high, sks->remote_id.low);
+	return 0;
+}
+
+static void recv_tcp_msg(struct socket *sock, struct msghdr *msg, int size,
+		int flags)
+{
+	const struct cred_security *cursec = current_security();
+	const struct sock_security *sks = sock->sk->sk_security;
+
+	printk(KERN_INFO "tcp recv 0x%x <- %04hx:%08x\n", cursec->csid,
+			sks->local_id.high, sks->local_id.low);
+}
+
+static int hifi_socket_sendmsg(struct socket *sock, struct msghdr *msg,
+		int size)
+{
+	/* Only use this function for connection-mode sockets */
+	switch (sock->sk->sk_family) {
+	case AF_UNIX:
+		if (sock->sk->sk_type == SOCK_DGRAM)
+			break;
+		return send_unix_msg(sock, msg, size);
+	case AF_INET:
+		// XXX just TCP for now
+		if (sock->sk->sk_prot != &tcp_prot)
+			break;
+		return send_tcp_msg(sock, msg, size);
+	}
+	return 0;
+}
+
+static void hifi_socket_post_recvmsg(struct socket *sock, struct msghdr *msg,
+		int size, int flags)
+{
+	// XXX more later?
+	if (sock->sk->sk_family != AF_INET || sock->sk->sk_prot != &tcp_prot)
+		return;
+	recv_tcp_msg(sock, msg, size, flags);
 }
 
 static int hifi_socket_recvmsg(struct socket *sock, struct msghdr *msg,
@@ -1208,9 +1250,6 @@ static int hifi_socket_sock_rcv_skb(struct sock *sk, struct sk_buff *skb)
 		return 0;
 
 	sks->local_id = sbs->id;
-	printk("tcp rcv local=%04hx:%08x rem=%04hx:%08x\n",
-			sks->local_id.high, sks->local_id.low,
-			sks->remote_id.high, sks->remote_id.low);
 	return 0;
 }
 
@@ -1221,8 +1260,8 @@ static void hifi_inet_conn_established(struct sock *sk, struct sk_buff *skb)
 	get_next_sockid(&sec->remote_id);
 	// skb->sk == NULL
 	// sk == parent socket
-	printk("conn_established label=%04hx:%08x\n", sec->remote_id.high,
-			sec->remote_id.low);
+	printk(KERN_INFO "conn_established label=%04hx:%08x\n",
+			sec->remote_id.high, sec->remote_id.low);
 }
 
 static void hifi_inet_csk_clone(struct sock *newsk,
@@ -1447,6 +1486,7 @@ static struct security_operations hifi_security_ops = {
 	HANDLE(unix_may_send),
 	HANDLE(socket_sendmsg),
 	HANDLE(socket_recvmsg),
+	HANDLE(socket_post_recvmsg),
 
 	HANDLE(sk_alloc_security),
 	HANDLE(sk_free_security),
