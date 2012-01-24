@@ -86,7 +86,7 @@ static unsigned boot_bytes = 0;
 static struct rchan *relay;
 static DEFINE_SPINLOCK(relay_lock);
 
-static atomic64_t socket_id = ATOMIC64_INIT(0);
+static atomic64_t sock_counter = ATOMIC64_INIT(0);
 
 
 /*
@@ -222,6 +222,14 @@ out_unmap:
 /*
  * Packet marking helper functions
  */
+static void get_next_sockid(struct sockid *label)
+{
+	u64 counter = atomic64_inc_return(&sock_counter);
+	label->high = counter >> 32;
+	label->low = counter & ((1LL << 32) - 1);
+	// XXX copy host uuid here
+}
+
 static int get_packet_label(const struct sk_buff *skb, struct sockid *label)
 {
 	struct iphdr *iph = ip_hdr(skb);
@@ -1190,50 +1198,59 @@ static int hifi_socket_recvmsg(struct socket *sock, struct msghdr *msg,
 /*
  * TCP hooks
  */
-static const struct sockid test_label = {0xABCD, 0x12345678};
-
 static int hifi_socket_sock_rcv_skb(struct sock *sk, struct sk_buff *skb)
 {
-	struct tcphdr *tcph;
+	struct sock_security *sks = sk->sk_security;
+	struct skb_security *sbs = skb_shinfo(skb)->security;
 
 	/* XXX Only TCP */
 	if (sk->sk_prot != &tcp_prot)
 		return 0;
-	tcph = tcp_hdr(skb);
-	printk(KERN_INFO "rcv tcp skb %p\n", skb_shinfo(skb));
+
+	sks->local_id = sbs->id;
+	printk("tcp rcv local=%04hx:%08x rem=%04hx:%08x\n",
+			sks->local_id.high, sks->local_id.low,
+			sks->remote_id.high, sks->remote_id.low);
 	return 0;
 }
 
 static void hifi_inet_conn_established(struct sock *sk, struct sk_buff *skb)
 {
+	struct sock_security *sec = sk->sk_security;
+
+	get_next_sockid(&sec->remote_id);
 	// skb->sk == NULL
 	// sk == parent socket
-	printk("conn_established sk=%p\n", sk);
+	printk("conn_established label=%04hx:%08x\n", sec->remote_id.high,
+			sec->remote_id.low);
 }
 
 static void hifi_inet_csk_clone(struct sock *newsk,
 		const struct request_sock *req)
 {
+	struct sock_security *sec = newsk->sk_security;
+
+	get_next_sockid(&sec->remote_id);
 	// req == same from inet_conn_request
-	printk(KERN_INFO "clone newsk=%p\n", newsk);
+	printk(KERN_INFO "clone label=%04hx:%08x\n", sec->remote_id.high,
+			sec->remote_id.low);
 }
 
 static int tcp_in(struct sk_buff *skb)
 {
-	struct sockid label;
+	struct skb_security *sec = skb_shinfo(skb)->security;
 
-	if (get_packet_label(skb, &label))
+	if (get_packet_label(skb, &sec->id))
 		return 0;
 	// skb->sk == NULL
-	printk(KERN_INFO "incoming tcp, label=%04hx:%08x skb=%p\n",
-			ntohs(label.high), ntohl(label.low), skb_shinfo(skb));
 	return 0;
 }
 
 static int tcp_out(struct sk_buff *skb)
 {
+	struct sock_security *sec = skb->sk->sk_security;
 	//tcph = (struct tcphdr *) ((char *) iph + (iph->ihl << 2));
-	return label_packet(skb, &test_label);
+	return label_packet(skb, &sec->remote_id);
 }
 
 
@@ -1254,8 +1271,11 @@ static int udp_in(struct sk_buff *skb)
 
 static int udp_out(struct sk_buff *skb)
 {
+	struct sockid label;
+
 	printk(KERN_INFO "outgoing udp %p", skb->sk);
-	return label_packet(skb, &test_label);
+	get_next_sockid(&label);
+	return label_packet(skb, &label);
 }
 
 
