@@ -1265,9 +1265,10 @@ static int hifi_socket_sock_rcv_skb(struct sock *sk, struct sk_buff *skb)
 	struct skb_security *sbs = skb_shinfo(skb)->security;
 
 	/* XXX Only TCP */
-	if (sk->sk_prot != &tcp_prot)
+	if (sk->sk_prot != &tcp_prot || sks->set || !sbs->set)
 		return 0;
 
+	sks->set = 1;
 	sks->local_id = sbs->id;
 	return 0;
 }
@@ -1300,6 +1301,7 @@ static int tcp_in(struct sk_buff *skb)
 
 	if (get_packet_label(skb, &sec->id))
 		return 0;
+	sec->set = 1;
 	// skb->sk == NULL
 	return 0;
 }
