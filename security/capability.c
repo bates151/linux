@@ -604,6 +604,11 @@ static int cap_socket_recvmsg(struct socket *sock, struct msghdr *msg,
 	return 0;
 }
 
+static void cap_socket_post_recvmsg(struct socket *sock, struct msghdr *msg,
+		int size, int flags)
+{
+}
+
 static int cap_socket_getsockname(struct socket *sock)
 {
 	return 0;
@@ -1036,6 +1041,7 @@ void __init security_fixup_ops(struct security_operations *ops)
 	set_to_cap_if_null(ops, socket_accept);
 	set_to_cap_if_null(ops, socket_sendmsg);
 	set_to_cap_if_null(ops, socket_recvmsg);
+	set_to_cap_if_null(ops, socket_post_recvmsg);
 	set_to_cap_if_null(ops, socket_getsockname);
 	set_to_cap_if_null(ops, socket_getpeername);
 	set_to_cap_if_null(ops, socket_setsockopt);

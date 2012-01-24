@@ -709,9 +709,14 @@ static inline int __sock_recvmsg_nosec(struct kiocb *iocb, struct socket *sock,
 static inline int __sock_recvmsg(struct kiocb *iocb, struct socket *sock,
 				 struct msghdr *msg, size_t size, int flags)
 {
-	int err = security_socket_recvmsg(sock, msg, size, flags);
+	int ret = security_socket_recvmsg(sock, msg, size, flags);
+	if (ret)
+		return ret;
 
-	return err ?: __sock_recvmsg_nosec(iocb, sock, msg, size, flags);
+	ret = __sock_recvmsg_nosec(iocb, sock, msg, size, flags);
+	if (ret >= 0)
+		security_socket_post_recvmsg(sock, msg, size, flags);
+	return ret;
 }
 
 int sock_recvmsg(struct socket *sock, struct msghdr *msg,
