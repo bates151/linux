@@ -714,7 +714,7 @@ static inline int __sock_recvmsg(struct kiocb *iocb, struct socket *sock,
 		return ret;
 
 	ret = __sock_recvmsg_nosec(iocb, sock, msg, size, flags);
-	if (ret >= 0)
+	if (ret > 0)
 		security_socket_post_recvmsg(sock, msg, size, flags);
 	return ret;
 }
