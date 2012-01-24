@@ -634,26 +634,24 @@ static int hifi_sb_kern_mount(struct super_block *sb, int flags, void *data)
 	sbs = sb->s_security;
 	d_root = dget(sb->s_root);
 	i_root = d_root->d_inode;
-	if (!i_root->i_op->getxattr) {
+	if (!i_root->i_op->getxattr ||
+			!strcmp("tmpfs", sb->s_type->name) ||
+			!strcmp("devtmpfs", sb->s_type->name)) {
 		/*
 		 * XXX Treats filesystems with no xattr support as new every
 		 * time - provenance continuity is lost here!
 		 */
-		printk(KERN_WARNING "Hi-Fi: no xattr support for "
+		printk(KERN_WARNING "Hi-Fi: no xattr/tmpfs: "
 		                            "%s\n", sb->s_type->name);
 		generate_random_uuid(sbs->uuid);
 		goto out;
 	}
 
 	mutex_lock(&i_root->i_mutex);
-
 	rv = i_root->i_op->getxattr(d_root, XATTR_NAME_HIFI, sbs->uuid, 16);
+	mutex_unlock(&i_root->i_mutex);
+
 	if (rv == 16) {
-		rv = 0;
-	} else if (!strcmp("tmpfs", sb->s_type->name) ||
-			!strcmp("devtmpfs", sb->s_type->name)) {
-		/* Treat as a never-encountered filesystem */
-		generate_random_uuid(sbs->uuid);
 		rv = 0;
 	} else if (rv >= 0 || rv == -ENODATA) {
 		/* Only mount filesystems that are correctly labeled */
@@ -667,8 +665,6 @@ static int hifi_sb_kern_mount(struct super_block *sb, int flags, void *data)
 				"err=%d\n", sb->s_id, sb->s_type->name, -rv);
 		/* rv from getxattr falls through */
 	}
-
-	mutex_unlock(&i_root->i_mutex);
 out:
 	dput(d_root);
 	return rv;
@@ -1231,8 +1227,6 @@ static void hifi_inet_conn_established(struct sock *sk, struct sk_buff *skb)
 	sec->remote_set = 1;
 	// skb->sk == NULL
 	// sk == parent socket
-	printk(KERN_INFO "conn_established label=%04hx:%08x\n",
-			sec->remote_id.high, sec->remote_id.low);
 }
 
 /*
@@ -1246,8 +1240,6 @@ static void hifi_inet_csk_clone(struct sock *newsk,
 	next_sockid(&sec->remote_id);
 	sec->remote_set = 1;
 	// req == same from inet_conn_request
-	printk(KERN_INFO "clone label=%04hx:%08x\n", sec->remote_id.high,
-			sec->remote_id.low);
 }
 
 /*
@@ -1313,7 +1305,6 @@ static int hifi_socket_sock_rcv_skb(struct sock *sk, struct sk_buff *skb)
 		return 0;
 
 	sks->local_set = 1;
-	printk("socket labeled (local).\n");
 	sks->local_id = sbs->id;
 	return 0;
 }
