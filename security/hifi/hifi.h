@@ -60,12 +60,12 @@ struct shm_security {
 struct sock_security {
 	struct sockid local_id;
 	struct sockid remote_id;
-	int set;
+	u8 local_set:1, remote_set:1;
 };
 
 struct skb_security {
 	struct sockid id;
-	int set;
+	u8 set:1;
 };
 
 

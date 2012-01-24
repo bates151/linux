@@ -1217,6 +1217,7 @@ static void hifi_inet_conn_established(struct sock *sk, struct sk_buff *skb)
 	struct sock_security *sec = sk->sk_security;
 
 	next_sockid(&sec->remote_id);
+	sec->remote_set = 1;
 	// skb->sk == NULL
 	// sk == parent socket
 	printk(KERN_INFO "conn_established label=%04hx:%08x\n",
@@ -1232,6 +1233,7 @@ static void hifi_inet_csk_clone(struct sock *newsk,
 	struct sock_security *sec = newsk->sk_security;
 
 	next_sockid(&sec->remote_id);
+	sec->remote_set = 1;
 	// req == same from inet_conn_request
 	printk(KERN_INFO "clone label=%04hx:%08x\n", sec->remote_id.high,
 			sec->remote_id.low);
@@ -1296,10 +1298,11 @@ static int hifi_socket_sock_rcv_skb(struct sock *sk, struct sk_buff *skb)
 	struct skb_security *sbs = skb_shinfo(skb)->security;
 
 	/* XXX Only TCP */
-	if (sk->sk_prot != &tcp_prot || sks->set || !sbs->set)
+	if (sk->sk_prot != &tcp_prot || sks->local_set || !sbs->set)
 		return 0;
 
-	sks->set = 1;
+	sks->local_set = 1;
+	printk("socket labeled (local).\n");
 	sks->local_id = sbs->id;
 	return 0;
 }
@@ -1331,6 +1334,8 @@ static int tcp_in(struct sk_buff *skb)
 static int tcp_out(struct sk_buff *skb)
 {
 	struct sock_security *sec = skb->sk->sk_security;
+	if (!sec->remote_set)
+		return 0;
 	//tcph = (struct tcphdr *) ((char *) iph + (iph->ihl << 2));
 	return label_packet(skb, &sec->remote_id);
 }
@@ -1341,13 +1346,14 @@ static int tcp_out(struct sk_buff *skb)
  */
 static int udp_in(struct sk_buff *skb)
 {
-	struct sockid label;
+	struct skb_security *sec = skb_shinfo(skb)->security;
 
-	if (get_packet_label(skb, &label))
+	if (get_packet_label(skb, &sec->id))
 		return 0;
+	sec->set = 1;
 	// skb->sk == NULL
-	printk(KERN_INFO "incoming udp, label=%04hx:%08x\n", ntohs(label.high),
-			ntohl(label.low));
+	printk(KERN_INFO "incoming udp, label=%04hx:%08x\n",
+			sec->id.high, sec->id.low);
 	return 0;
 }
 
@@ -1358,7 +1364,7 @@ static int udp_out(struct sk_buff *skb)
 {
 	struct sockid label;
 
-	printk(KERN_INFO "outgoing udp %p", skb->sk);
+	printk(KERN_INFO "outgoing udp\n");
 	// XXX not here... at send
 	next_sockid(&label);
 	return label_packet(skb, &label);
