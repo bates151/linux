@@ -1112,7 +1112,7 @@ static int hifi_msg_queue_msgrcv(struct msg_queue *msq, struct msg_msg *msg,
 /*
  * UNIX domain sockets
  */
-static int hifi_unix_may_send(struct socket *sock, struct socket *other)
+static int send_unix_dgram(struct socket *sock, struct socket *other)
 {
 	const struct cred_security *cursec = current_security();
 	struct sb_security *sbs;
@@ -1133,7 +1133,7 @@ static int hifi_unix_may_send(struct socket *sock, struct socket *other)
 	return 0;
 }
 
-static int send_unix_msg(struct socket *sock, struct msghdr *msg, int size)
+static int send_unix_connmode(struct socket *sock, struct msghdr *msg, int size)
 {
 	const struct cred_security *cursec = current_security();
 	struct sock *peer;
@@ -1188,15 +1188,36 @@ static void recv_tcp_msg(struct socket *sock, struct msghdr *msg, int size,
 			sks->local_id.high, sks->local_id.low);
 }
 
+static void recv_unix_msg(struct socket *sock, struct msghdr *msg, int size,
+		int flags)
+{
+	const struct cred_security *cursec = current_security();
+	struct sb_security *sbs;
+	struct provmsg_unixrecv logmsg;
+
+	logmsg.header.msgtype = PROVMSG_UNIXRECV;
+	logmsg.header.cred_id = cursec->csid;
+
+	sbs = SOCK_INODE(sock)->i_sb->s_security;
+	memcpy(logmsg.inode.sb_uuid, sbs->uuid, sizeof(logmsg.inode.sb_uuid));
+	logmsg.inode.ino = SOCK_INODE(sock)->i_ino;
+
+	write_to_relay(&logmsg, sizeof(logmsg));
+}
+
+
+/*
+ * Socket send/recv hooks
+ */
 static int hifi_socket_sendmsg(struct socket *sock, struct msghdr *msg,
 		int size)
 {
-	/* Only use this function for connection-mode sockets */
 	switch (sock->sk->sk_family) {
 	case AF_UNIX:
+		/* XXX Just connection-mode sockets for now */
 		if (sock->sk->sk_type == SOCK_DGRAM)
 			break;
-		return send_unix_msg(sock, msg, size);
+		return send_unix_connmode(sock, msg, size);
 	case AF_INET:
 		// XXX just TCP for now
 		if (sock->sk->sk_prot != &tcp_prot)
@@ -1210,29 +1231,27 @@ static void hifi_socket_post_recvmsg(struct socket *sock, struct msghdr *msg,
 		int size, int flags)
 {
 	// XXX more later?
-	if (sock->sk->sk_family != AF_INET || sock->sk->sk_prot != &tcp_prot)
-		return;
-	recv_tcp_msg(sock, msg, size, flags);
+	switch (sock->sk->sk_family) {
+	case AF_UNIX:
+		recv_unix_msg(sock, msg, size, flags);
+		break;
+	case AF_INET:
+		if (sock->sk->sk_prot != &tcp_prot)
+			return;
+		recv_tcp_msg(sock, msg, size, flags);
+		break;
+	}
 }
 
-static int hifi_socket_recvmsg(struct socket *sock, struct msghdr *msg,
-		int size, int flags)
+static int hifi_unix_may_send(struct socket *sock, struct socket *other)
 {
-	const struct cred_security *cursec = current_security();
-	struct sb_security *sbs;
-	struct provmsg_unixrecv logmsg;
+	BUG_ON(sock->sk->sk_family != AF_UNIX);
 
-	if (sock->sk->sk_family != AF_UNIX)
-		return 0;
-
-	logmsg.header.msgtype = PROVMSG_UNIXRECV;
-	logmsg.header.cred_id = cursec->csid;
-
-	sbs = SOCK_INODE(sock)->i_sb->s_security;
-	memcpy(logmsg.inode.sb_uuid, sbs->uuid, sizeof(logmsg.inode.sb_uuid));
-	logmsg.inode.ino = SOCK_INODE(sock)->i_ino;
-
-	write_to_relay(&logmsg, sizeof(logmsg));
+	switch (sock->sk->sk_type) {
+	case SOCK_DGRAM:
+		return send_unix_dgram(sock, other);
+		break;
+	}
 	return 0;
 }
 
@@ -1485,7 +1504,6 @@ static struct security_operations hifi_security_ops = {
 
 	HANDLE(unix_may_send),
 	HANDLE(socket_sendmsg),
-	HANDLE(socket_recvmsg),
 	HANDLE(socket_post_recvmsg),
 
 	HANDLE(sk_alloc_security),
