@@ -57,15 +57,15 @@ MODULE_LICENSE("GPL");
 
 
 int bufs = 32;
-int log_buf_size = 20;
+int buf_size_shift = 20;
 int boot_buf_size = 1024;
 
 module_param(bufs, int, 0);
-module_param(log_buf_size, int, 0);
+module_param(buf_size_shift, int, 0);
 module_param(boot_buf_size, int, 0);
 
 MODULE_PARM_DESC(bufs, "Number of relay sub-buffers for provenance data (default: 32)");
-MODULE_PARM_DESC(log_buf_size, "Log base 2 of sub-buffer size (default: 20=1MiB");
+MODULE_PARM_DESC(buf_size_shift, "Log base 2 of sub-buffer size (default: 20=1MiB");
 MODULE_PARM_DESC(boot_buf_size, "Size of temporary boot buffer (default: 1024)");
 
 
@@ -89,9 +89,27 @@ static DEFINE_SPINLOCK(relay_lock);
 static atomic64_t sock_counter = ATOMIC64_INIT(0);
 
 
-/*
- * Relay-related handlers and structures
- */
+/******************************************************************************
+ *
+ * RELAY SETUP
+ *
+ ******************************************************************************/
+/* Writes to the relay */
+static void write_to_relay(const void *data, size_t length)
+{
+	unsigned long flags;
+	spin_lock_irqsave(&relay_lock, flags);
+	if (unlikely(!relay)) {
+		if (boot_bytes + length > boot_buf_size)
+			panic("Hi-Fi: Boot buffer overrun");
+		memcpy(boot_buffer + boot_bytes, data, length);
+		boot_bytes += length;
+	} else {
+		relay_write(relay, data, length);
+	}
+	spin_unlock_irqrestore(&relay_lock, flags);
+}
+
 static struct dentry *relay_create_file(const char *filename,
 		struct dentry *parent, int mode, struct rchan_buf *buf,
 		int *is_global)
@@ -116,27 +134,12 @@ static int relay_subbuf_start(struct rchan_buf *buf, void *subbuf,
 	return 1;
 }
 
+/* Sets up the relay */
 static struct rchan_callbacks relay_callbacks = {
 	.create_buf_file = relay_create_file,
 	.remove_buf_file = relay_remove_file,
 	.subbuf_start = relay_subbuf_start
 };
-
-/* Writes to the relay */
-static void write_to_relay(const void *data, size_t length)
-{
-	unsigned long flags;
-	spin_lock_irqsave(&relay_lock, flags);
-	if (unlikely(!relay)) {
-		if (boot_bytes + length > boot_buf_size)
-			panic("Hi-Fi: Boot buffer overrun");
-		memcpy(boot_buffer + boot_bytes, data, length);
-		boot_bytes += length;
-	} else {
-		relay_write(relay, data, length);
-	}
-	spin_unlock_irqrestore(&relay_lock, flags);
-}
 
 /* Initial message */
 static const struct provmsg_boot init_bootmsg = {
@@ -147,13 +150,12 @@ static const struct provmsg_boot init_bootmsg = {
 static const struct provmsg_setid init_setidmsg = {
 	.header.msgtype = PROVMSG_SETID,
 	.header.cred_id = 0,
-	/* Static, so all IDs are 0 */
+	/* Static, so all IDs are (correctly) inited to 0 */
 };
 
-/* Sets up the relay */
 static void init_relay(void)
 {
-	relay = relay_open("provenance", NULL, (1 << log_buf_size),
+	relay = relay_open("provenance", NULL, (1 << buf_size_shift),
 			bufs, &relay_callbacks, NULL);
 	if (!relay)
 		panic("Hi-Fi: Could not create relay");
@@ -165,8 +167,14 @@ static void init_relay(void)
 }
 
 
+/******************************************************************************
+ *
+ * HELPER FUNCTIONS
+ *
+ ******************************************************************************/
+
 /*
- * Function for grabbing the argv and envp from a bprm
+ * Grabs the argv and envp from a bprm.
  */
 static int copy_bytes_bprm(struct linux_binprm *bprm, char *dst,
 		unsigned int count)
@@ -218,11 +226,63 @@ out_unmap:
 	return rv;
 }
 
+/*
+ * Returns the next available identifier.  Adapted from alloc_pidmap in
+ * kernel/pid.c.
+ */
+static int alloc_provid(void)
+{
+	int i, offset, page, max_scan, id, last = provid_last;
+
+	id = last + 1;
+	if (id >= NUM_PROVIDS)
+		id = 0;
+	offset = id & BITS_PER_PAGE_MASK;
+	page = id / BITS_PER_PAGE;
+	max_scan = PROVID_MAP_PAGES - !offset;
+
+	for (i = 0; i <= max_scan; i++) {
+		if (likely(atomic_read(&provid_free[page]))) {
+			do {
+				if (!test_and_set_bit(offset,
+							provid_page[page])) {
+					atomic_dec(&provid_free[page]);
+					provid_last = id;
+					return id;
+				}
+				offset = find_next_zero_bit(provid_page[page],
+						BITS_PER_PAGE, offset);
+				id = page * BITS_PER_PAGE + offset;
+			} while (offset < BITS_PER_PAGE && id < NUM_PROVIDS &&
+					(i != max_scan || id < last ||
+					 !((last+1) & BITS_PER_PAGE_MASK)));
+		}
+		if (page < PROVID_MAP_PAGES)
+			page++;
+		else
+			page = 0;
+		offset = 0;
+		id = page * BITS_PER_PAGE;
+	}
+	return -1;
+}
 
 /*
- * Packet marking helper functions
+ * Frees a provenance identifier.  Adapted from free_pidmap in kernel/pid.c.
  */
-static void get_next_sockid(struct sockid *label)
+static void free_provid(int id) {
+	int offset, page;
+	offset = id & BITS_PER_PAGE_MASK;
+	page = id / BITS_PER_PAGE;
+
+	clear_bit(offset, provid_page[page]);
+	atomic_inc(&provid_free[page]);
+}
+
+/*
+ * Returns the next socket ID for this system.
+ */
+static void next_sockid(struct sockid *label)
 {
 	u64 counter = atomic64_inc_return(&sock_counter);
 	label->high = counter >> 32;
@@ -230,6 +290,9 @@ static void get_next_sockid(struct sockid *label)
 	// XXX copy host uuid here
 }
 
+/*
+ * Reads the label off of the packet in skb.
+ */
 static int get_packet_label(const struct sk_buff *skb, struct sockid *label)
 {
 	struct iphdr *iph = ip_hdr(skb);
@@ -254,6 +317,9 @@ static int get_packet_label(const struct sk_buff *skb, struct sockid *label)
 	return -1;
 }
 
+/*
+ * Adds a label to the packet in skb.
+ */
 static int label_packet(struct sk_buff *skb, const struct sockid *label)
 {
 	struct iphdr *iph;
@@ -315,169 +381,11 @@ static int label_packet(struct sk_buff *skb, const struct sockid *label)
 }
 
 
-/*
- * The hooks
- */
-
-/* This is the first hook that runs after the mount tree is initialized */
-static int hifi_socket_create(int family, int type, int protocol, int kern)
-{
-	if (!relay)
-		init_relay();
-	return 0;
-}
-
-/* Allocates the sb_security structure for this superblock. */
-static int hifi_sb_alloc_security(struct super_block *sb)
-{
-	struct sb_security *sbs;
-
-	sbs = kzalloc(sizeof(*sbs), GFP_KERNEL);
-	if (!sbs)
-		return -ENOMEM;
-
-	sb->s_security = sbs;
-	return 0;
-}
-
-/* Frees the sb_security structure for this superblock. */
-static void hifi_sb_free_security(struct super_block *sb)
-{
-	struct sb_security *sbs = sb->s_security;
-
-	sb->s_security = NULL;
-	kfree(sbs);
-}
-
-/*
- * Load the UUID from this filesystem's root inode if there is one, and create a
- * new temporary one if it doesn't support xattrs (e.g. temporary filesystems).
- */
-/* Precondition asserted by BUG_ON: sb != NULL */
-/* Precondition asserted by get_sb: sb->s_root != NULL */
-static int hifi_sb_kern_mount(struct super_block *sb, int flags, void *data)
-{
-	struct sb_security *sbs;
-	struct dentry *d_root;
-	struct inode *i_root;
-	int rv = 0;
-
-	/* Paranoia sets in... */
-	sbs = sb->s_security;
-	d_root = dget(sb->s_root);
-	i_root = d_root->d_inode;
-	if (!i_root->i_op->getxattr) {
-		/*
-		 * XXX Treats filesystems with no xattr support as new every
-		 * time - provenance continuity is lost here!
-		 */
-		printk(KERN_WARNING "Hi-Fi: no xattr support for "
-		                            "%s\n", sb->s_type->name);
-		generate_random_uuid(sbs->uuid);
-		goto out;
-	}
-
-	mutex_lock(&i_root->i_mutex);
-
-	rv = i_root->i_op->getxattr(d_root, XATTR_NAME_HIFI, sbs->uuid, 16);
-	if (rv == 16) {
-		rv = 0;
-	} else if (!strcmp("tmpfs", sb->s_type->name) ||
-			!strcmp("devtmpfs", sb->s_type->name)) {
-		/* Treat as a never-encountered filesystem */
-		generate_random_uuid(sbs->uuid);
-		rv = 0;
-	} else if (rv >= 0 || rv == -ENODATA) {
-		/* Only mount filesystems that are correctly labeled */
-		printk(KERN_ERR "Hi-Fi: Missing or malformed UUID label "
-				"on filesystem.  If this is\n");
-		printk(KERN_ERR "       your root filesystem, kernel may "
-				"panic or drop to initrd.\n");
-		rv = -EPERM;
-	} else {
-		printk(KERN_ERR "Hi-Fi: getxattr dev=%s type=%s "
-				"err=%d\n", sb->s_id, sb->s_type->name, -rv);
-		/* rv from getxattr falls through */
-	}
-
-	mutex_unlock(&i_root->i_mutex);
-out:
-	dput(d_root);
-	return rv;
-}
-
-/*
- * Sets up the identifier map
- */
-static int init_provid_map(void)
-{
-	int i;
-	void *page;
-
-	for (i = 0; i < PROVID_MAP_PAGES; i++) {
-		page = kzalloc(PAGE_SIZE, GFP_KERNEL);
-		if (unlikely(!page)) {
-			while (--i >= 0)
-				kfree(provid_page[i]);
-			return -ENOMEM;
-		}
-		provid_page[i] = page;
-	}
-	return 0;
-}
-
-/*
- * Returns the next available identifier.  Adapted from alloc_pidmap in
- * kernel/pid.c.
- */
-static int alloc_provid(void)
-{
-	int i, offset, page, max_scan, id, last = provid_last;
-
-	id = last + 1;
-	if (id >= NUM_PROVIDS)
-		id = 0;
-	offset = id & BITS_PER_PAGE_MASK;
-	page = id / BITS_PER_PAGE;
-	max_scan = PROVID_MAP_PAGES - !offset;
-
-	for (i = 0; i <= max_scan; i++) {
-		if (likely(atomic_read(&provid_free[page]))) {
-			do {
-				if (!test_and_set_bit(offset,
-							provid_page[page])) {
-					atomic_dec(&provid_free[page]);
-					provid_last = id;
-					return id;
-				}
-				offset = find_next_zero_bit(provid_page[page],
-						BITS_PER_PAGE, offset);
-				id = page * BITS_PER_PAGE + offset;
-			} while (offset < BITS_PER_PAGE && id < NUM_PROVIDS &&
-					(i != max_scan || id < last ||
-					 !((last+1) & BITS_PER_PAGE_MASK)));
-		}
-		if (page < PROVID_MAP_PAGES)
-			page++;
-		else
-			page = 0;
-		offset = 0;
-		id = page * BITS_PER_PAGE;
-	}
-	return -1;
-}
-
-/*
- * Frees a provenance identifier.  Adapted from free_pidmap in kernel/pid.c.
- */
-static void free_provid(int id) {
-	int offset, page;
-	offset = id & BITS_PER_PAGE_MASK;
-	page = id / BITS_PER_PAGE;
-
-	clear_bit(offset, provid_page[page]);
-	atomic_inc(&provid_free[page]);
-}
+/******************************************************************************
+ *
+ * PROCESS/THREAD HOOKS
+ *
+ ******************************************************************************/
 
 /*
  * Initializes a new cred_security object
@@ -692,8 +600,71 @@ out:
 }
 
 
+/******************************************************************************
+ *
+ * FILESYSTEM HOOKS
+ *
+ ******************************************************************************/
+
 /*
- * Inode creation and deletion
+ * Load the UUID from this filesystem's root inode if there is one, and create a
+ * new temporary one if it doesn't support xattrs (e.g. temporary filesystems).
+ */
+/* Precondition asserted by BUG_ON: sb != NULL */
+/* Precondition asserted by get_sb: sb->s_root != NULL */
+static int hifi_sb_kern_mount(struct super_block *sb, int flags, void *data)
+{
+	struct sb_security *sbs;
+	struct dentry *d_root;
+	struct inode *i_root;
+	int rv = 0;
+
+	/* Paranoia sets in... */
+	sbs = sb->s_security;
+	d_root = dget(sb->s_root);
+	i_root = d_root->d_inode;
+	if (!i_root->i_op->getxattr) {
+		/*
+		 * XXX Treats filesystems with no xattr support as new every
+		 * time - provenance continuity is lost here!
+		 */
+		printk(KERN_WARNING "Hi-Fi: no xattr support for "
+		                            "%s\n", sb->s_type->name);
+		generate_random_uuid(sbs->uuid);
+		goto out;
+	}
+
+	mutex_lock(&i_root->i_mutex);
+
+	rv = i_root->i_op->getxattr(d_root, XATTR_NAME_HIFI, sbs->uuid, 16);
+	if (rv == 16) {
+		rv = 0;
+	} else if (!strcmp("tmpfs", sb->s_type->name) ||
+			!strcmp("devtmpfs", sb->s_type->name)) {
+		/* Treat as a never-encountered filesystem */
+		generate_random_uuid(sbs->uuid);
+		rv = 0;
+	} else if (rv >= 0 || rv == -ENODATA) {
+		/* Only mount filesystems that are correctly labeled */
+		printk(KERN_ERR "Hi-Fi: Missing or malformed UUID label "
+				"on filesystem.  If this is\n");
+		printk(KERN_ERR "       your root filesystem, kernel may "
+				"panic or drop to initrd.\n");
+		rv = -EPERM;
+	} else {
+		printk(KERN_ERR "Hi-Fi: getxattr dev=%s type=%s "
+				"err=%d\n", sb->s_id, sb->s_type->name, -rv);
+		/* rv from getxattr falls through */
+	}
+
+	mutex_unlock(&i_root->i_mutex);
+out:
+	dput(d_root);
+	return rv;
+}
+
+/*
+ * Creating an inode
  */
 static int hifi_inode_init_security(struct inode *inode, struct inode *dir,
 		const struct qstr *qstr, char **name, void **value, size_t *len)
@@ -744,6 +715,9 @@ static int hifi_inode_init_security(struct inode *inode, struct inode *dir,
 	return -EOPNOTSUPP;
 }
 
+/*
+ * Deleting an inode (when nlink hits 0)
+ */
 static void hifi_inode_free_security(struct inode *inode)
 {
 	const struct cred_security *cursec;
@@ -765,7 +739,37 @@ static void hifi_inode_free_security(struct inode *inode)
 }
 
 /*
- * Hooks for tracking name and location of inodes over time.
+ * Accessing an inode - called at file open and useful for directory reads which
+ * pass provenance from the metadata stored in the directory inode itself.
+ */
+static int hifi_inode_permission(struct inode *inode, int mask)
+{
+	const struct cred_security *cursec = current_security();
+	const struct sb_security *sbs;
+	struct provmsg_inode_p msg;
+
+	if (cursec->flags & CSEC_OPAQUE)
+		return 0;
+
+	msg.header.msgtype = PROVMSG_INODE_P;
+	msg.header.cred_id = cursec->csid;
+
+	if (inode) {
+		sbs = inode->i_sb->s_security;
+		memcpy(msg.inode.sb_uuid, sbs->uuid, sizeof(msg.inode.sb_uuid));
+		msg.inode.ino = inode->i_ino;
+	} else {
+		memset(msg.inode.sb_uuid, 0, sizeof(msg.inode.sb_uuid));
+		msg.inode.ino = 0;
+	}
+
+	msg.mask = mask;
+	write_to_relay(&msg, sizeof(msg));
+	return 0;
+}
+
+/*
+ * Adding a new filename for an inode
  */
 static int hifi_inode_link(struct dentry *old_dentry, struct inode *dir,
 		struct dentry *new_dentry)
@@ -793,6 +797,9 @@ static int hifi_inode_link(struct dentry *old_dentry, struct inode *dir,
 	return 0;
 }
 
+/*
+ * Removing a filename for an inode
+ */
 static int hifi_inode_unlink(struct inode *dir, struct dentry *dentry)
 {
 	const struct cred_security *cursec = current_security();
@@ -817,28 +824,9 @@ static int hifi_inode_unlink(struct inode *dir, struct dentry *dentry)
 	return 0;
 }
 
-static int hifi_inode_readlink(struct dentry *dentry)
-{
-	const struct cred_security *cursec = current_security();
-	const struct sb_security *sbs;
-	struct provmsg_readlink *msg;
-
-	msg = kmalloc(sizeof(*msg), GFP_KERNEL);
-	if (!msg)
-		return -ENOMEM;
-
-	msg->header.msgtype = PROVMSG_READLINK;
-	msg->header.cred_id = cursec->csid;
-
-	sbs = dentry->d_sb->s_security;
-	memcpy(msg->inode.sb_uuid, sbs->uuid, sizeof(msg->inode.sb_uuid));
-	msg->inode.ino = dentry->d_inode->i_ino;
-
-	write_to_relay(msg, sizeof(*msg));
-	kfree(msg);
-	return 0;
-}
-
+/*
+ * Changing a filename for an inode
+ */
 static int hifi_inode_rename(struct inode *old_dir, struct dentry *old_dentry,
 		struct inode *new_dir, struct dentry *new_dentry)
 {
@@ -886,8 +874,8 @@ static int hifi_inode_rename(struct inode *old_dir, struct dentry *old_dentry,
 }
 
 /*
- * Hook for changes to inode attributes.  Specifically, we're tracking owner,
- * group, and mode.
+ * Changing inode attributes - specifically, we're tracking owner, group, and
+ * mode.
  */
 int hifi_inode_setattr(struct dentry *dentry, struct iattr *attr)
 {
@@ -918,8 +906,36 @@ int hifi_inode_setattr(struct dentry *dentry, struct iattr *attr)
 }
 
 /*
- * Run at every call to read or write.  The only calls to this function have
- * @mask set to either MAY_READ or MAY_WRITE, nothing else, and never both.
+ * Reading a symbolic link
+ */
+static int hifi_inode_readlink(struct dentry *dentry)
+{
+	const struct cred_security *cursec = current_security();
+	const struct sb_security *sbs;
+	struct provmsg_readlink *msg;
+
+	if (cursec->flags & CSEC_OPAQUE)
+		return 0;
+
+	msg = kmalloc(sizeof(*msg), GFP_KERNEL);
+	if (!msg)
+		return -ENOMEM;
+
+	msg->header.msgtype = PROVMSG_READLINK;
+	msg->header.cred_id = cursec->csid;
+
+	sbs = dentry->d_sb->s_security;
+	memcpy(msg->inode.sb_uuid, sbs->uuid, sizeof(msg->inode.sb_uuid));
+	msg->inode.ino = dentry->d_inode->i_ino;
+
+	write_to_relay(msg, sizeof(*msg));
+	kfree(msg);
+	return 0;
+}
+
+/*
+ * Reading or writing an open file.  The only calls to this function have @mask
+ * set to either MAY_READ or MAY_WRITE, nothing else, and never both.
  */
 static int hifi_file_permission(struct file *file, int mask)
 {
@@ -948,7 +964,7 @@ static int hifi_file_permission(struct file *file, int mask)
 }
 
 /*
- * Run every time a process maps a file into its memory.  XXX I'm not sure what
+ * Mapping an open file into a process's address space.  XXX I'm not sure what
  * it means to have a negative dentry on this file.  We must assume that a
  * file's full permissions are used by the resulting memory accesses, e.g. a
  * file mapped read-write is both read and written by the process at all times.
@@ -983,69 +999,25 @@ static int hifi_file_mmap(struct file *file, unsigned long reqprot,
 	return 0;
 }
 
-/*
- * Hook for inode accesses - called at file open and useful for directory reads
- * which pass provenance from the metadata stored in the directory inode
- * itself.
- */
-static int hifi_inode_permission(struct inode *inode, int mask)
-{
-	const struct cred_security *cursec = current_security();
-	const struct sb_security *sbs;
-	struct provmsg_inode_p msg;
 
-	if (cursec->flags & CSEC_OPAQUE)
-		return 0;
-
-	msg.header.msgtype = PROVMSG_INODE_P;
-	msg.header.cred_id = cursec->csid;
-
-	if (inode) {
-		sbs = inode->i_sb->s_security;
-		memcpy(msg.inode.sb_uuid, sbs->uuid, sizeof(msg.inode.sb_uuid));
-		msg.inode.ino = inode->i_ino;
-	} else {
-		memset(msg.inode.sb_uuid, 0, sizeof(msg.inode.sb_uuid));
-		msg.inode.ino = 0;
-	}
-
-	msg.mask = mask;
-	write_to_relay(&msg, sizeof(msg));
-	return 0;
-}
-
+/******************************************************************************
+ *
+ * XSI IPC hooks
+ *
+ ******************************************************************************/
 
 /*
- * XSI shared memory
+ * Attaching to XSI shared memory
  */
-static int hifi_shm_alloc_security(struct shmid_kernel *shp)
-{
-	struct shm_security *shmsec;
-
-	shmsec = kzalloc(sizeof(*shmsec), GFP_KERNEL);
-	if (!shmsec)
-		return -ENOMEM;
-	shmsec->shmid = alloc_provid();
-	shp->shm_perm.security = shmsec;
-	return 0;
-}
-
-static void hifi_shm_free_security(struct shmid_kernel *shp)
-{
-	struct shm_security *shmsec = shp->shm_perm.security;
-	int id = shmsec->shmid;
-
-	shp->shm_perm.security = NULL;
-	kfree(shmsec);
-	free_provid(id);
-}
-
 static int hifi_shm_shmat(struct shmid_kernel *shp, char __user *shmaddr,
 		int shmflg)
 {
 	const struct cred_security *cursec = current_security();
 	const struct shm_security *shmsec = shp->shm_perm.security;
 	struct provmsg_shmat msg;
+
+	if (cursec->flags & CSEC_OPAQUE)
+		return 0;
 
 	msg.header.msgtype = PROVMSG_SHMAT;
 	msg.header.cred_id = cursec->csid;
@@ -1058,33 +1030,16 @@ static int hifi_shm_shmat(struct shmid_kernel *shp, char __user *shmaddr,
 
 
 /*
- * Security alloc/free for individual messages in a message queue
+ * Sending a message to an XSI message queue
  */
-static int hifi_msg_msg_alloc_security(struct msg_msg *msg) {
-	struct msg_security *msgsec;
-
-	msgsec = kzalloc(sizeof(*msgsec), GFP_KERNEL);
-	if (!msgsec)
-		return -ENOMEM;
-	msgsec->msgid = alloc_provid();
-	msg->security = msgsec;
-	return 0;
-}
-
-static void hifi_msg_msg_free_security(struct msg_msg *msg) {
-	struct msg_security *msgsec = msg->security;
-	int id = msgsec->msgid;
-
-	msg->security = NULL;
-	kfree(msgsec);
-	free_provid(id);
-}
-
 static int hifi_msg_queue_msgsnd(struct msg_queue *msq, struct msg_msg *msg,
 		int msqflg) {
 	const struct cred_security *cursec = current_security();
 	const struct msg_security *msgsec = msg->security;
 	struct provmsg_mqsend logmsg;
+
+	if (cursec->flags & CSEC_OPAQUE)
+		return 0;
 
 	logmsg.header.msgtype = PROVMSG_MQSEND;
 	logmsg.header.cred_id = cursec->csid;
@@ -1094,11 +1049,17 @@ static int hifi_msg_queue_msgsnd(struct msg_queue *msq, struct msg_msg *msg,
 	return 0;
 }
 
+/*
+ * Receiving a message from an XSI message queue
+ */
 static int hifi_msg_queue_msgrcv(struct msg_queue *msq, struct msg_msg *msg,
 		struct task_struct *target, long type, int mode) {
 	const struct cred_security *cursec = target->cred->security;
 	const struct msg_security *msgsec = msg->security;
 	struct provmsg_mqrecv logmsg;
+
+	if (cursec->flags & CSEC_OPAQUE)
+		return 0;
 
 	logmsg.header.msgtype = PROVMSG_MQRECV;
 	logmsg.header.cred_id = cursec->csid;
@@ -1109,8 +1070,14 @@ static int hifi_msg_queue_msgrcv(struct msg_queue *msq, struct msg_msg *msg,
 }
 
 
+/******************************************************************************
+ *
+ * PROTOCOL-SPECIFIC SOCKET HANDLERS
+ *
+ ******************************************************************************/
+
 /*
- * UNIX domain sockets
+ * Sending on a datagram UNIX domain socket
  */
 static int send_unix_dgram(struct socket *sock, struct socket *other)
 {
@@ -1133,6 +1100,9 @@ static int send_unix_dgram(struct socket *sock, struct socket *other)
 	return 0;
 }
 
+/*
+ * Sending on a connection-mode UNIX domain socket
+ */
 static int send_unix_connmode(struct socket *sock, struct msghdr *msg, int size)
 {
 	const struct cred_security *cursec = current_security();
@@ -1168,26 +1138,9 @@ static int send_unix_connmode(struct socket *sock, struct msghdr *msg, int size)
 	return 0;
 }
 
-static int send_tcp_msg(struct socket *sock, struct msghdr *msg, int size)
-{
-	const struct cred_security *cursec = current_security();
-	const struct sock_security *sks = sock->sk->sk_security;
-
-	printk(KERN_INFO "tcp send 0x%x -> %04hx:%08x\n", cursec->csid,
-			sks->remote_id.high, sks->remote_id.low);
-	return 0;
-}
-
-static void recv_tcp_msg(struct socket *sock, struct msghdr *msg, int size,
-		int flags)
-{
-	const struct cred_security *cursec = current_security();
-	const struct sock_security *sks = sock->sk->sk_security;
-
-	printk(KERN_INFO "tcp recv 0x%x <- %04hx:%08x\n", cursec->csid,
-			sks->local_id.high, sks->local_id.low);
-}
-
+/*
+ * Receiving on a UNIX domain socket (any kind)
+ */
 static void recv_unix_msg(struct socket *sock, struct msghdr *msg, int size,
 		int flags)
 {
@@ -1205,13 +1158,96 @@ static void recv_unix_msg(struct socket *sock, struct msghdr *msg, int size,
 	write_to_relay(&logmsg, sizeof(logmsg));
 }
 
+/*
+ * Sending on a TCP socket
+ */
+static int send_tcp_msg(struct socket *sock, struct msghdr *msg, int size)
+{
+	const struct cred_security *cursec = current_security();
+	const struct sock_security *sks = sock->sk->sk_security;
+
+	printk(KERN_INFO "tcp send 0x%x -> %04hx:%08x\n", cursec->csid,
+			sks->remote_id.high, sks->remote_id.low);
+	return 0;
+}
 
 /*
- * Socket send/recv hooks
+ * Receiving on a TCP socket
+ */
+static void recv_tcp_msg(struct socket *sock, struct msghdr *msg, int size,
+		int flags)
+{
+	const struct cred_security *cursec = current_security();
+	const struct sock_security *sks = sock->sk->sk_security;
+
+	printk(KERN_INFO "tcp recv 0x%x <- %04hx:%08x\n", cursec->csid,
+			sks->local_id.high, sks->local_id.low);
+}
+
+
+/******************************************************************************
+ *
+ * SOCKET HOOKS
+ *
+ ******************************************************************************/
+
+/*
+ * Sending on a UNIX domain socket
+ */
+static int hifi_unix_may_send(struct socket *sock, struct socket *other)
+{
+	const struct cred_security *cursec = current_security();
+
+	if (cursec->flags & CSEC_OPAQUE)
+		return 0;
+
+	switch (sock->sk->sk_type) {
+	case SOCK_DGRAM:
+		return send_unix_dgram(sock, other);
+		break;
+	}
+	return 0;
+}
+
+/*
+ * Completing a connection at the client side of a TCP socket
+ */
+static void hifi_inet_conn_established(struct sock *sk, struct sk_buff *skb)
+{
+	struct sock_security *sec = sk->sk_security;
+
+	next_sockid(&sec->remote_id);
+	// skb->sk == NULL
+	// sk == parent socket
+	printk(KERN_INFO "conn_established label=%04hx:%08x\n",
+			sec->remote_id.high, sec->remote_id.low);
+}
+
+/*
+ * Completing a connection at the server side of a TCP socket
+ */
+static void hifi_inet_csk_clone(struct sock *newsk,
+		const struct request_sock *req)
+{
+	struct sock_security *sec = newsk->sk_security;
+
+	next_sockid(&sec->remote_id);
+	// req == same from inet_conn_request
+	printk(KERN_INFO "clone label=%04hx:%08x\n", sec->remote_id.high,
+			sec->remote_id.low);
+}
+
+/*
+ * Sending on a socket
  */
 static int hifi_socket_sendmsg(struct socket *sock, struct msghdr *msg,
 		int size)
 {
+	const struct cred_security *cursec = current_security();
+
+	if (cursec->flags & CSEC_OPAQUE)
+		return 0;
+
 	switch (sock->sk->sk_family) {
 	case AF_UNIX:
 		/* XXX Just connection-mode sockets for now */
@@ -1227,9 +1263,17 @@ static int hifi_socket_sendmsg(struct socket *sock, struct msghdr *msg,
 	return 0;
 }
 
+/*
+ * Receiving on a socket
+ */
 static void hifi_socket_post_recvmsg(struct socket *sock, struct msghdr *msg,
 		int size, int flags)
 {
+	const struct cred_security *cursec = current_security();
+
+	if (cursec->flags & CSEC_OPAQUE)
+		return;
+
 	// XXX more later?
 	switch (sock->sk->sk_family) {
 	case AF_UNIX:
@@ -1243,21 +1287,8 @@ static void hifi_socket_post_recvmsg(struct socket *sock, struct msghdr *msg,
 	}
 }
 
-static int hifi_unix_may_send(struct socket *sock, struct socket *other)
-{
-	BUG_ON(sock->sk->sk_family != AF_UNIX);
-
-	switch (sock->sk->sk_type) {
-	case SOCK_DGRAM:
-		return send_unix_dgram(sock, other);
-		break;
-	}
-	return 0;
-}
-
-
 /*
- * TCP hooks
+ * Delivering a packet to a socket
  */
 static int hifi_socket_sock_rcv_skb(struct sock *sk, struct sk_buff *skb)
 {
@@ -1273,28 +1304,16 @@ static int hifi_socket_sock_rcv_skb(struct sock *sk, struct sk_buff *skb)
 	return 0;
 }
 
-static void hifi_inet_conn_established(struct sock *sk, struct sk_buff *skb)
-{
-	struct sock_security *sec = sk->sk_security;
 
-	get_next_sockid(&sec->remote_id);
-	// skb->sk == NULL
-	// sk == parent socket
-	printk(KERN_INFO "conn_established label=%04hx:%08x\n",
-			sec->remote_id.high, sec->remote_id.low);
-}
+/******************************************************************************
+ *
+ * NETFILTER HANDLERS/HOOKS
+ *
+ ******************************************************************************/
 
-static void hifi_inet_csk_clone(struct sock *newsk,
-		const struct request_sock *req)
-{
-	struct sock_security *sec = newsk->sk_security;
-
-	get_next_sockid(&sec->remote_id);
-	// req == same from inet_conn_request
-	printk(KERN_INFO "clone label=%04hx:%08x\n", sec->remote_id.high,
-			sec->remote_id.low);
-}
-
+/*
+ * TCP packet arrival
+ */
 static int tcp_in(struct sk_buff *skb)
 {
 	struct skb_security *sec = skb_shinfo(skb)->security;
@@ -1306,6 +1325,9 @@ static int tcp_in(struct sk_buff *skb)
 	return 0;
 }
 
+/*
+ * TCP packet transmission
+ */
 static int tcp_out(struct sk_buff *skb)
 {
 	struct sock_security *sec = skb->sk->sk_security;
@@ -1315,7 +1337,7 @@ static int tcp_out(struct sk_buff *skb)
 
 
 /*
- * UDP hooks
+ * UDP packet arrival
  */
 static int udp_in(struct sk_buff *skb)
 {
@@ -1329,18 +1351,22 @@ static int udp_in(struct sk_buff *skb)
 	return 0;
 }
 
+/*
+ * UDP packet transmission
+ */
 static int udp_out(struct sk_buff *skb)
 {
 	struct sockid label;
 
 	printk(KERN_INFO "outgoing udp %p", skb->sk);
-	get_next_sockid(&label);
+	// XXX not here... at send
+	next_sockid(&label);
 	return label_packet(skb, &label);
 }
 
 
 /*
- * Netfilter hooks
+ * IPv4 packet arrival - handle by protocol
  */
 static unsigned int hifi_ipv4_in(unsigned int hooknum, struct sk_buff *skb,
 		const struct net_device *in, const struct net_device *out,
@@ -1362,6 +1388,9 @@ static unsigned int hifi_ipv4_in(unsigned int hooknum, struct sk_buff *skb,
 	return NF_ACCEPT;
 }
 
+/*
+ * IPv4 packet transmission - handle by protocol
+ */
 static unsigned int hifi_ipv4_out(unsigned int hooknum, struct sk_buff *skb,
 		const struct net_device *in, const struct net_device *out,
 		int (*okfn)(struct sk_buff *))
@@ -1384,6 +1413,45 @@ static unsigned int hifi_ipv4_out(unsigned int hooknum, struct sk_buff *skb,
 }
 
 
+/******************************************************************************
+ *
+ * ALLOCATION HOOKS
+ *
+ ******************************************************************************/
+
+/* This is the first hook that runs after the mount tree is initialized */
+static int hifi_socket_create(int family, int type, int protocol, int kern)
+{
+	if (!relay)
+		init_relay();
+	return 0;
+}
+
+
+/*
+ * Superblock (filesystem) allocation hooks
+ */
+static int hifi_sb_alloc_security(struct super_block *sb)
+{
+	struct sb_security *sbs;
+
+	sbs = kzalloc(sizeof(*sbs), GFP_KERNEL);
+	if (!sbs)
+		return -ENOMEM;
+
+	sb->s_security = sbs;
+	return 0;
+}
+
+static void hifi_sb_free_security(struct super_block *sb)
+{
+	struct sb_security *sbs = sb->s_security;
+
+	sb->s_security = NULL;
+	kfree(sbs);
+}
+
+
 /*
  * Socket allocation hooks
  */
@@ -1391,7 +1459,7 @@ static int hifi_sk_alloc_security(struct sock *sk, int family, gfp_t priority)
 {
 	struct sock_security *sec;
 
-	sec = kmalloc(sizeof(*sec), priority);
+	sec = kzalloc(sizeof(*sec), priority);
 	if (!sec)
 		return -ENOMEM;
 
@@ -1410,6 +1478,7 @@ static void hifi_sk_free_security(struct sock *sk)
 static void hifi_sk_clone_security(const struct sock *sk, struct sock *newsk)
 {
 	// Is already allocated
+	// Called when a new child is cloned from a listening socket
 }
 
 
@@ -1421,10 +1490,12 @@ static int hifi_skb_shinfo_alloc_security(struct sk_buff *skb, int recycling,
 {
 	struct skb_security *sec;
 
-	if (recycling)
+	if (recycling) {
+		memset(skb_shinfo(skb)->security, 0, sizeof(*sec));
 		return 0;
+	}
 
-	sec = kmalloc(sizeof(*sec), gfp);
+	sec = kzalloc(sizeof(*sec), gfp);
 	if (!sec)
 		return -ENOMEM;
 
@@ -1458,32 +1529,56 @@ static int hifi_skb_shinfo_copy(struct sk_buff *skb,
 
 
 /*
- * Initialization functions and structures
+ * XSI IPC
  */
-static int set_init_creds(void)
+static int hifi_shm_alloc_security(struct shmid_kernel *shp)
 {
-	struct cred *cred = (struct cred *) current->real_cred;
-	struct cred_security *csec;
-	int id;
+	struct shm_security *shmsec;
 
-	csec = kzalloc(sizeof(*csec), GFP_KERNEL);
-	if (!csec)
+	shmsec = kzalloc(sizeof(*shmsec), GFP_KERNEL);
+	if (!shmsec)
 		return -ENOMEM;
-
-	id = alloc_provid();
-	if (id < 0)
-		goto out_nomem;
-	csec->csid = id;
-	kref_init(&csec->refcount);
-	csec->flags = CSEC_INITED;
-
-	cred->security = csec;
+	shmsec->shmid = alloc_provid();
+	shp->shm_perm.security = shmsec;
 	return 0;
-
-out_nomem:
-	kfree(csec);
-	return -ENOMEM;
 }
+
+static void hifi_shm_free_security(struct shmid_kernel *shp)
+{
+	struct shm_security *shmsec = shp->shm_perm.security;
+	int id = shmsec->shmid;
+
+	shp->shm_perm.security = NULL;
+	kfree(shmsec);
+	free_provid(id);
+}
+
+static int hifi_msg_msg_alloc_security(struct msg_msg *msg) {
+	struct msg_security *msgsec;
+
+	msgsec = kzalloc(sizeof(*msgsec), GFP_KERNEL);
+	if (!msgsec)
+		return -ENOMEM;
+	msgsec->msgid = alloc_provid();
+	msg->security = msgsec;
+	return 0;
+}
+
+static void hifi_msg_msg_free_security(struct msg_msg *msg) {
+	struct msg_security *msgsec = msg->security;
+	int id = msgsec->msgid;
+
+	msg->security = NULL;
+	kfree(msgsec);
+	free_provid(id);
+}
+
+
+/******************************************************************************
+ *
+ * LSM INITIALIZATION
+ *
+ ******************************************************************************/
 
 static struct nf_hook_ops hifi_ipv4_hooks[] = {
 	{
@@ -1499,6 +1594,14 @@ static struct nf_hook_ops hifi_ipv4_hooks[] = {
 		.priority = NF_IP_PRI_LAST,
 	},
 };
+
+static int __init hifi_nf_init(void)
+{
+	if (nf_register_hooks(hifi_ipv4_hooks, ARRAY_SIZE(hifi_ipv4_hooks)))
+		panic("Hi-Fi: failed to register netfilter hooks");
+	return 0;
+}
+postcore_initcall(hifi_nf_init);
 
 static struct security_operations hifi_security_ops = {
 	.name    = "hifi",
@@ -1554,6 +1657,54 @@ static struct security_operations hifi_security_ops = {
 	HANDLE(bprm_check_security),
 };
 
+/*
+ * Fills out the initial kernel credential structure
+ */
+static int set_init_creds(void)
+{
+	struct cred *cred = (struct cred *) current->real_cred;
+	struct cred_security *csec;
+	int id;
+
+	csec = kzalloc(sizeof(*csec), GFP_KERNEL);
+	if (!csec)
+		return -ENOMEM;
+
+	id = alloc_provid();
+	if (id < 0)
+		goto out_nomem;
+	csec->csid = id;
+	kref_init(&csec->refcount);
+	csec->flags = CSEC_INITED;
+
+	cred->security = csec;
+	return 0;
+
+out_nomem:
+	kfree(csec);
+	return -ENOMEM;
+}
+
+/*
+ * Sets up the provid bitmap
+ */
+static int init_provid_map(void)
+{
+	int i;
+	void *page;
+
+	for (i = 0; i < PROVID_MAP_PAGES; i++) {
+		page = kzalloc(PAGE_SIZE, GFP_KERNEL);
+		if (unlikely(!page)) {
+			while (--i >= 0)
+				kfree(provid_page[i]);
+			return -ENOMEM;
+		}
+		provid_page[i] = page;
+	}
+	return 0;
+}
+
 static int __init hifi_init(void)
 {
 	int rv = 0;
@@ -1578,13 +1729,4 @@ static int __init hifi_init(void)
 	printk(KERN_INFO "Hi-Fi: registered\n");
 	return 0;
 }
-
-static int __init hifi_nf_init(void)
-{
-	if (nf_register_hooks(hifi_ipv4_hooks, ARRAY_SIZE(hifi_ipv4_hooks)))
-		panic("Hi-Fi: failed to register netfilter hooks");
-	return 0;
-}
-
 security_initcall(hifi_init);
-postcore_initcall(hifi_nf_init);
