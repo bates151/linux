@@ -94,7 +94,10 @@ static atomic64_t sock_counter = ATOMIC64_INIT(0);
  * RELAY SETUP
  *
  ******************************************************************************/
-/* Writes to the relay */
+
+/*
+ * Writes to the relay
+ */
 static void write_to_relay(const void *data, size_t length)
 {
 	unsigned long flags;
@@ -110,6 +113,9 @@ static void write_to_relay(const void *data, size_t length)
 	spin_unlock_irqrestore(&relay_lock, flags);
 }
 
+/*
+ * Implementation of relay behavior
+ */
 static struct dentry *relay_create_file(const char *filename,
 		struct dentry *parent, int mode, struct rchan_buf *buf,
 		int *is_global)
@@ -134,26 +140,29 @@ static int relay_subbuf_start(struct rchan_buf *buf, void *subbuf,
 	return 1;
 }
 
-/* Sets up the relay */
 static struct rchan_callbacks relay_callbacks = {
 	.create_buf_file = relay_create_file,
 	.remove_buf_file = relay_remove_file,
 	.subbuf_start = relay_subbuf_start
 };
 
-/* Initial message */
+/* Initial messages */
 static const struct provmsg_boot init_bootmsg = {
 	.header.msgtype = PROVMSG_BOOT,
 	.header.cred_id = 0,
 	.version = HIFI_PROTO_VERSION,
 };
+
 static const struct provmsg_setid init_setidmsg = {
 	.header.msgtype = PROVMSG_SETID,
 	.header.cred_id = 0,
 	/* Static, so all IDs are (correctly) inited to 0 */
 };
 
-static void init_relay(void)
+/*
+ * Sets up the relay
+ */
+static int __init hifi_init_relay(void)
 {
 	relay = relay_open("provenance", NULL, (1 << buf_size_shift),
 			bufs, &relay_callbacks, NULL);
@@ -164,7 +173,9 @@ static void init_relay(void)
 	printk(KERN_INFO "Hi-Fi: Replaying boot buffer: %uB\n", boot_bytes);
 	write_to_relay(boot_buffer, boot_bytes);
 	kfree(boot_buffer);
+	return 0;
 }
+core_initcall(hifi_init_relay);
 
 
 /******************************************************************************
@@ -1418,21 +1429,38 @@ static unsigned int hifi_ipv4_out(unsigned int hooknum, struct sk_buff *skb,
 	return NF_ACCEPT;
 }
 
+/*
+ * Initializes the Netfilter hooks
+ */
+static int __init hifi_nf_init(void)
+{
+	static struct nf_hook_ops hifi_ipv4_hooks[] = {
+		{
+			.hook = hifi_ipv4_in,
+			.pf = PF_INET,
+			.hooknum = NF_INET_LOCAL_IN,
+			.priority = NF_IP_PRI_FIRST,
+		},
+		{
+			.hook = hifi_ipv4_out,
+			.pf = PF_INET,
+			.hooknum = NF_INET_LOCAL_OUT,
+			.priority = NF_IP_PRI_LAST,
+		},
+	};
+
+	if (nf_register_hooks(hifi_ipv4_hooks, ARRAY_SIZE(hifi_ipv4_hooks)))
+		panic("Hi-Fi: failed to register netfilter hooks");
+	return 0;
+}
+postcore_initcall(hifi_nf_init);
+
 
 /******************************************************************************
  *
  * ALLOCATION HOOKS
  *
  ******************************************************************************/
-
-/* This is the first hook that runs after the mount tree is initialized */
-static int hifi_socket_create(int family, int type, int protocol, int kern)
-{
-	if (!relay)
-		init_relay();
-	return 0;
-}
-
 
 /*
  * Superblock (filesystem) allocation hooks
@@ -1586,33 +1614,56 @@ static void hifi_msg_msg_free_security(struct msg_msg *msg) {
  *
  ******************************************************************************/
 
-static struct nf_hook_ops hifi_ipv4_hooks[] = {
-	{
-		.hook = hifi_ipv4_in,
-		.pf = PF_INET,
-		.hooknum = NF_INET_LOCAL_IN,
-		.priority = NF_IP_PRI_FIRST,
-	},
-	{
-		.hook = hifi_ipv4_out,
-		.pf = PF_INET,
-		.hooknum = NF_INET_LOCAL_OUT,
-		.priority = NF_IP_PRI_LAST,
-	},
-};
-
-static int __init hifi_nf_init(void)
+/*
+ * Sets up the provid bitmap
+ */
+static int init_provid_map(void)
 {
-	if (nf_register_hooks(hifi_ipv4_hooks, ARRAY_SIZE(hifi_ipv4_hooks)))
-		panic("Hi-Fi: failed to register netfilter hooks");
+	int i;
+	void *page;
+
+	for (i = 0; i < PROVID_MAP_PAGES; i++) {
+		page = kzalloc(PAGE_SIZE, GFP_KERNEL);
+		if (unlikely(!page)) {
+			while (--i >= 0)
+				kfree(provid_page[i]);
+			return -ENOMEM;
+		}
+		provid_page[i] = page;
+	}
 	return 0;
 }
-postcore_initcall(hifi_nf_init);
+
+/*
+ * Fills out the initial kernel credential structure
+ */
+static int set_init_creds(void)
+{
+	struct cred *cred = (struct cred *) current->real_cred;
+	struct cred_security *csec;
+	int id;
+
+	csec = kzalloc(sizeof(*csec), GFP_KERNEL);
+	if (!csec)
+		return -ENOMEM;
+
+	id = alloc_provid();
+	if (id < 0)
+		goto out_nomem;
+	csec->csid = id;
+	kref_init(&csec->refcount);
+	csec->flags = CSEC_INITED;
+
+	cred->security = csec;
+	return 0;
+
+out_nomem:
+	kfree(csec);
+	return -ENOMEM;
+}
 
 static struct security_operations hifi_security_ops = {
 	.name    = "hifi",
-	HANDLE(socket_create),
-
 	HANDLE(unix_may_send),
 	HANDLE(socket_sendmsg),
 	HANDLE(socket_post_recvmsg),
@@ -1662,54 +1713,6 @@ static struct security_operations hifi_security_ops = {
 
 	HANDLE(bprm_check_security),
 };
-
-/*
- * Fills out the initial kernel credential structure
- */
-static int set_init_creds(void)
-{
-	struct cred *cred = (struct cred *) current->real_cred;
-	struct cred_security *csec;
-	int id;
-
-	csec = kzalloc(sizeof(*csec), GFP_KERNEL);
-	if (!csec)
-		return -ENOMEM;
-
-	id = alloc_provid();
-	if (id < 0)
-		goto out_nomem;
-	csec->csid = id;
-	kref_init(&csec->refcount);
-	csec->flags = CSEC_INITED;
-
-	cred->security = csec;
-	return 0;
-
-out_nomem:
-	kfree(csec);
-	return -ENOMEM;
-}
-
-/*
- * Sets up the provid bitmap
- */
-static int init_provid_map(void)
-{
-	int i;
-	void *page;
-
-	for (i = 0; i < PROVID_MAP_PAGES; i++) {
-		page = kzalloc(PAGE_SIZE, GFP_KERNEL);
-		if (unlikely(!page)) {
-			while (--i >= 0)
-				kfree(provid_page[i]);
-			return -ENOMEM;
-		}
-		provid_page[i] = page;
-	}
-	return 0;
-}
 
 static int __init hifi_init(void)
 {
