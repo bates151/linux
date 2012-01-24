@@ -26,6 +26,14 @@ struct sb_inode {
 	uint64_t ino;
 } __attribute__((packed));
 
+/* Structure referring to a receive queue on a specific system */
+struct sockid {
+	// XXX for now
+	//unsigned char host_uuid[16];
+	/* High 16 bits are not used */
+	uint64_t sockid;
+} __attribute__((packed));
+
 
 /* Protocol definitions */
 enum {

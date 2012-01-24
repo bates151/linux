@@ -5,10 +5,16 @@
 #include <linux/types.h>
 #include <linux/xattr.h>
 
+#include "hifi_proto.h"
+
 
 /* Key names for xattrs */
 #define XATTR_HIFI_SUFFIX "hifi"
 #define XATTR_NAME_HIFI XATTR_SECURITY_PREFIX XATTR_HIFI_SUFFIX
+
+
+/* IP options number */
+#define IPOPT_HIFI 0x9e
 
 
 /* Shortcut for security_operations */
@@ -47,6 +53,17 @@ struct msg_security {
 
 struct shm_security {
 	u32 shmid;
+};
+
+
+/* Security structures for sockets */
+struct sock_security {
+	struct sockid local_id;
+	struct sockid remote_id;
+};
+
+struct skb_security {
+	struct sockid id;
 };
 
 
