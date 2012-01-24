@@ -19,7 +19,6 @@
 #include <linux/spinlock.h>
 #include <linux/types.h>
 #include <linux/bug.h>
-#include <linux/security.h>
 
 #include <net/sock.h>
 
@@ -64,9 +63,6 @@ struct request_sock {
 	unsigned long			expires;
 	const struct request_sock_ops	*rsk_ops;
 	struct sock			*sk;
-#ifdef CONFIG_SECURITY_NETWORK
-	void				*security;
-#endif
 	u32				secid;
 	u32				peer_secid;
 };
@@ -78,17 +74,11 @@ static inline struct request_sock *reqsk_alloc(const struct request_sock_ops *op
 	if (req != NULL)
 		req->rsk_ops = ops;
 
-	if (security_reqsk_alloc(req)) {
-		kmem_cache_free(ops->slab, req);
-		req = NULL;
-	}
-
 	return req;
 }
 
 static inline void __reqsk_free(struct request_sock *req)
 {
-	security_reqsk_free(req);
 	kmem_cache_free(req->rsk_ops->slab, req);
 }
 
