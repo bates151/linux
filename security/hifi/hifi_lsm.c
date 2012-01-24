@@ -435,17 +435,6 @@ static void cred_security_destroy(struct kref *ref)
 }
 
 /*
- * Free the security part of a set of credentials
- */
-static void hifi_cred_free(struct cred *cred)
-{
-	struct cred_security *csec = cred->security;
-
-	cred->security = NULL;
-	kref_put(&csec->refcount, cred_security_destroy);
-}
-
-/*
  * Prepare a new set of credentials
  */
 static int hifi_cred_prepare(struct cred *new, const struct cred *old,
@@ -504,6 +493,17 @@ static int hifi_cred_alloc_blank(struct cred *cred, gfp_t gfp)
 
 	cred->security = csec;
 	return 0;
+}
+
+/*
+ * Free the security part of a set of credentials
+ */
+static void hifi_cred_free(struct cred *cred)
+{
+	struct cred_security *csec = cred->security;
+
+	cred->security = NULL;
+	kref_put(&csec->refcount, cred_security_destroy);
 }
 
 /*
@@ -608,6 +608,30 @@ static int hifi_bprm_check_security(struct linux_binprm *bprm)
 out:
 	kfree(msg);
 	return rv;
+}
+
+/*
+ * Committing (and possibly changing) credentials at process execution
+ */
+static void hifi_bprm_committing_creds(struct linux_binprm *bprm)
+{
+	const struct cred_security *csec = bprm->cred->security;
+	struct provmsg_setid buf;
+
+	if (csec->flags & CSEC_OPAQUE)
+		return;
+
+	buf.header.msgtype = PROVMSG_SETID;
+	buf.header.cred_id = csec->csid;
+	buf.uid = bprm->cred->uid;
+	buf.gid = bprm->cred->gid;
+	buf.suid = bprm->cred->suid;
+	buf.sgid = bprm->cred->sgid;
+	buf.euid = bprm->cred->euid;
+	buf.egid = bprm->cred->egid;
+	buf.fsuid = bprm->cred->fsuid;
+	buf.fsgid = bprm->cred->fsgid;
+	write_to_relay(&buf, sizeof(buf));
 }
 
 
@@ -1199,50 +1223,6 @@ static void recv_tcp_msg(struct socket *sock, struct msghdr *msg, int size,
  ******************************************************************************/
 
 /*
- * Sending on a UNIX domain socket
- */
-static int hifi_unix_may_send(struct socket *sock, struct socket *other)
-{
-	const struct cred_security *cursec = current_security();
-
-	if (cursec->flags & CSEC_OPAQUE)
-		return 0;
-
-	switch (sock->sk->sk_type) {
-	case SOCK_DGRAM:
-		return send_unix_dgram(sock, other);
-		break;
-	}
-	return 0;
-}
-
-/*
- * Completing a connection at the client side of a TCP socket
- */
-static void hifi_inet_conn_established(struct sock *sk, struct sk_buff *skb)
-{
-	struct sock_security *sec = sk->sk_security;
-
-	next_sockid(&sec->remote_id);
-	sec->remote_set = 1;
-	// skb->sk == NULL
-	// sk == parent socket
-}
-
-/*
- * Completing a connection at the server side of a TCP socket
- */
-static void hifi_inet_csk_clone(struct sock *newsk,
-		const struct request_sock *req)
-{
-	struct sock_security *sec = newsk->sk_security;
-
-	next_sockid(&sec->remote_id);
-	sec->remote_set = 1;
-	// req == same from inet_conn_request
-}
-
-/*
  * Sending on a socket
  */
 static int hifi_socket_sendmsg(struct socket *sock, struct msghdr *msg,
@@ -1307,6 +1287,50 @@ static int hifi_socket_sock_rcv_skb(struct sock *sk, struct sk_buff *skb)
 	sks->local_set = 1;
 	sks->local_id = sbs->id;
 	return 0;
+}
+
+/*
+ * Sending on a UNIX domain socket
+ */
+static int hifi_unix_may_send(struct socket *sock, struct socket *other)
+{
+	const struct cred_security *cursec = current_security();
+
+	if (cursec->flags & CSEC_OPAQUE)
+		return 0;
+
+	switch (sock->sk->sk_type) {
+	case SOCK_DGRAM:
+		return send_unix_dgram(sock, other);
+		break;
+	}
+	return 0;
+}
+
+/*
+ * Completing a connection at the client side of a TCP socket
+ */
+static void hifi_inet_conn_established(struct sock *sk, struct sk_buff *skb)
+{
+	struct sock_security *sec = sk->sk_security;
+
+	next_sockid(&sec->remote_id);
+	sec->remote_set = 1;
+	// skb->sk == NULL
+	// sk == parent socket
+}
+
+/*
+ * Completing a connection at the server side of a TCP socket
+ */
+static void hifi_inet_csk_clone(struct sock *newsk,
+		const struct request_sock *req)
+{
+	struct sock_security *sec = newsk->sk_security;
+
+	next_sockid(&sec->remote_id);
+	sec->remote_set = 1;
+	// req == same from inet_conn_request
 }
 
 
@@ -1478,6 +1502,52 @@ static void hifi_sb_free_security(struct super_block *sb)
 
 
 /*
+ * XSI IPC
+ */
+static int hifi_shm_alloc_security(struct shmid_kernel *shp)
+{
+	struct shm_security *shmsec;
+
+	shmsec = kzalloc(sizeof(*shmsec), GFP_KERNEL);
+	if (!shmsec)
+		return -ENOMEM;
+	shmsec->shmid = alloc_provid();
+	shp->shm_perm.security = shmsec;
+	return 0;
+}
+
+static void hifi_shm_free_security(struct shmid_kernel *shp)
+{
+	struct shm_security *shmsec = shp->shm_perm.security;
+	int id = shmsec->shmid;
+
+	shp->shm_perm.security = NULL;
+	kfree(shmsec);
+	free_provid(id);
+}
+
+static int hifi_msg_msg_alloc_security(struct msg_msg *msg) {
+	struct msg_security *msgsec;
+
+	msgsec = kzalloc(sizeof(*msgsec), GFP_KERNEL);
+	if (!msgsec)
+		return -ENOMEM;
+	msgsec->msgid = alloc_provid();
+	msg->security = msgsec;
+	return 0;
+}
+
+static void hifi_msg_msg_free_security(struct msg_msg *msg) {
+	struct msg_security *msgsec = msg->security;
+	int id = msgsec->msgid;
+
+	msg->security = NULL;
+	kfree(msgsec);
+	free_provid(id);
+}
+
+
+/*
  * Socket allocation hooks
  */
 static int hifi_sk_alloc_security(struct sock *sk, int family, gfp_t priority)
@@ -1553,52 +1623,6 @@ static int hifi_skb_shinfo_copy(struct sk_buff *skb,
 }
 
 
-/*
- * XSI IPC
- */
-static int hifi_shm_alloc_security(struct shmid_kernel *shp)
-{
-	struct shm_security *shmsec;
-
-	shmsec = kzalloc(sizeof(*shmsec), GFP_KERNEL);
-	if (!shmsec)
-		return -ENOMEM;
-	shmsec->shmid = alloc_provid();
-	shp->shm_perm.security = shmsec;
-	return 0;
-}
-
-static void hifi_shm_free_security(struct shmid_kernel *shp)
-{
-	struct shm_security *shmsec = shp->shm_perm.security;
-	int id = shmsec->shmid;
-
-	shp->shm_perm.security = NULL;
-	kfree(shmsec);
-	free_provid(id);
-}
-
-static int hifi_msg_msg_alloc_security(struct msg_msg *msg) {
-	struct msg_security *msgsec;
-
-	msgsec = kzalloc(sizeof(*msgsec), GFP_KERNEL);
-	if (!msgsec)
-		return -ENOMEM;
-	msgsec->msgid = alloc_provid();
-	msg->security = msgsec;
-	return 0;
-}
-
-static void hifi_msg_msg_free_security(struct msg_msg *msg) {
-	struct msg_security *msgsec = msg->security;
-	int id = msgsec->msgid;
-
-	msg->security = NULL;
-	kfree(msgsec);
-	free_provid(id);
-}
-
-
 /******************************************************************************
  *
  * LSM INITIALIZATION
@@ -1655,9 +1679,52 @@ out_nomem:
 
 static struct security_operations hifi_security_ops = {
 	.name    = "hifi",
-	HANDLE(unix_may_send),
+
+	/* Provenance-generating hooks */
+
+	HANDLE(cred_prepare),
+	HANDLE(cred_alloc_blank),
+	HANDLE(cred_free),
+	HANDLE(cred_transfer),
+	HANDLE(task_fix_setuid),
+
+	HANDLE(bprm_check_security),
+	HANDLE(bprm_committing_creds),
+
+	HANDLE(sb_kern_mount),
+
+	HANDLE(inode_init_security),
+	HANDLE(inode_free_security),
+	HANDLE(inode_permission),
+	HANDLE(inode_link),
+	HANDLE(inode_unlink),
+	HANDLE(inode_rename),
+	HANDLE(inode_setattr),
+	HANDLE(inode_readlink),
+
+	HANDLE(file_permission),
+	HANDLE(file_mmap),
+
+	HANDLE(shm_shmat),
+	HANDLE(msg_queue_msgsnd),
+	HANDLE(msg_queue_msgrcv),
+
 	HANDLE(socket_sendmsg),
 	HANDLE(socket_post_recvmsg),
+	HANDLE(socket_sock_rcv_skb),
+	HANDLE(unix_may_send),
+	HANDLE(inet_conn_established),
+	HANDLE(inet_csk_clone),
+
+	/* Allocation hooks */
+
+	HANDLE(sb_alloc_security),
+	HANDLE(sb_free_security),
+
+	HANDLE(shm_alloc_security),
+	HANDLE(shm_free_security),
+	HANDLE(msg_msg_alloc_security),
+	HANDLE(msg_msg_free_security),
 
 	HANDLE(sk_alloc_security),
 	HANDLE(sk_free_security),
@@ -1665,44 +1732,6 @@ static struct security_operations hifi_security_ops = {
 	HANDLE(skb_shinfo_alloc_security),
 	HANDLE(skb_shinfo_free_security),
 	HANDLE(skb_shinfo_copy),
-
-	HANDLE(socket_sock_rcv_skb),
-	HANDLE(inet_conn_established),
-	HANDLE(inet_csk_clone),
-
-	HANDLE(sb_alloc_security),
-	HANDLE(sb_free_security),
-	HANDLE(sb_kern_mount),
-
-	HANDLE(file_permission),
-	HANDLE(file_mmap),
-	HANDLE(inode_permission),
-
-	HANDLE(inode_init_security),
-	HANDLE(inode_free_security),
-
-	HANDLE(inode_link),
-	HANDLE(inode_unlink),
-	HANDLE(inode_readlink),
-	HANDLE(inode_rename),
-	HANDLE(inode_setattr),
-
-	HANDLE(shm_alloc_security),
-	HANDLE(shm_free_security),
-	HANDLE(shm_shmat),
-
-	HANDLE(msg_msg_alloc_security),
-	HANDLE(msg_msg_free_security),
-	HANDLE(msg_queue_msgsnd),
-	HANDLE(msg_queue_msgrcv),
-
-	HANDLE(cred_alloc_blank),
-	HANDLE(cred_free),
-	HANDLE(cred_prepare),
-	HANDLE(cred_transfer),
-	HANDLE(task_fix_setuid),
-
-	HANDLE(bprm_check_security),
 };
 
 static int __init hifi_init(void)
