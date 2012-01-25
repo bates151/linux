@@ -655,6 +655,11 @@ static int cap_skb_shinfo_copy(struct sk_buff *skb,
 	return 0;
 }
 
+static int cap_skbqueue_append_data(struct sock *sk, struct sk_buff *head)
+{
+	return 0;
+}
+
 static int cap_socket_getpeersec_stream(struct socket *sock,
 					char __user *optval,
 					int __user *optlen, unsigned len)
@@ -1051,6 +1056,7 @@ void __init security_fixup_ops(struct security_operations *ops)
 	set_to_cap_if_null(ops, skb_shinfo_alloc_security);
 	set_to_cap_if_null(ops, skb_shinfo_free_security);
 	set_to_cap_if_null(ops, skb_shinfo_copy);
+	set_to_cap_if_null(ops, skbqueue_append_data);
 	set_to_cap_if_null(ops, socket_getpeersec_stream);
 	set_to_cap_if_null(ops, socket_getpeersec_dgram);
 	set_to_cap_if_null(ops, sk_alloc_security);

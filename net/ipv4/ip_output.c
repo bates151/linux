@@ -48,6 +48,7 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/security.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/highmem.h>
@@ -854,6 +855,10 @@ static int __ip_append_data(struct sock *sk,
 	if (!skb)
 		goto alloc_new_skb;
 
+	/* Queue is not empty, so check security now */
+	if ((err = security_skbqueue_append_data(sk, skb_peek(queue))))
+		goto error;
+
 	while (length > 0) {
 		/* Check if the remaining data fits into current packet. */
 		copy = mtu - skb->len;
@@ -918,6 +923,15 @@ alloc_new_skb:
 			}
 			if (skb == NULL)
 				goto error;
+
+			/* Check security using new skb if queue was empty */
+			if (!skb_prev) {
+				err = security_skbqueue_append_data(sk, skb);
+				if (err) {
+					kfree_skb(skb);
+					goto error;
+				}
+			}
 
 			/*
 			 *	Fill in the control structures

@@ -1147,6 +1147,11 @@ int security_skb_shinfo_copy(struct sk_buff *skb,
 	return security_ops->skb_shinfo_copy(skb, shinfo, gfp);
 }
 
+int security_skbqueue_append_data(struct sock *sk, struct sk_buff *head)
+{
+	return security_ops->skbqueue_append_data(sk, head);
+}
+
 int security_socket_getpeersec_stream(struct socket *sock, char __user *optval,
 				      int __user *optlen, unsigned len)
 {
