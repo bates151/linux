@@ -46,6 +46,7 @@
 #include <linux/udp.h>
 #include <linux/tcp.h>
 #include <net/tcp.h>
+#include <net/udp.h>
 
 #include "hifi.h"
 #include "hifi_proto.h"
@@ -1273,6 +1274,27 @@ static void hifi_socket_post_recvmsg(struct socket *sock, struct msghdr *msg,
 }
 
 /*
+ * Appending data to an outgoing datagram
+ */
+static int hifi_skbqueue_append_data(struct sock *sk, struct sk_buff *head)
+{
+	struct cred_security *csc = current_security();
+	struct skb_security *sks = skb_shinfo(head)->security;
+
+	/* XXX Better way to check this... */
+	/* Locking??? */
+	if (sk->sk_prot != &udp_prot)
+		return 0;
+	if (!sks->set) {
+		next_sockid(&sks->id);
+		sks->set = 1;
+	}
+	printk(KERN_INFO "udp send 0x%x -> %04hx:%08x\n", csc->csid,
+			sks->id.high, sks->id.low);
+	return 0;
+}
+
+/*
  * Delivering a packet to a socket
  */
 static int hifi_socket_sock_rcv_skb(struct sock *sk, struct sk_buff *skb)
@@ -1280,12 +1302,14 @@ static int hifi_socket_sock_rcv_skb(struct sock *sk, struct sk_buff *skb)
 	struct sock_security *sks = sk->sk_security;
 	struct skb_security *sbs = skb_shinfo(skb)->security;
 
-	/* XXX Only TCP */
-	if (sk->sk_prot != &tcp_prot || sks->local_set || !sbs->set)
+	/* XXX Only TCP.  Need a better way to check this!! */
+	if (sk->sk_prot != &tcp_prot)
+		return 0;
+	if (sks->local_set || !sbs->set)
 		return 0;
 
-	sks->local_set = 1;
 	sks->local_id = sbs->id;
+	sks->local_set = 1;
 	return 0;
 }
 
@@ -1388,12 +1412,13 @@ static int udp_in(struct sk_buff *skb)
  */
 static int udp_out(struct sk_buff *skb)
 {
-	struct sockid label;
+	struct skb_security *sec = skb_shinfo(skb)->security;
+	if (!sec->set)
+		return 0;
 
-	printk(KERN_INFO "outgoing udp\n");
-	// XXX not here... at send
-	next_sockid(&label);
-	return label_packet(skb, &label);
+	printk(KERN_INFO "outgoing udp, label=%04hx:%08x\n",
+			sec->id.high, sec->id.low);
+	return label_packet(skb, &sec->id);
 }
 
 
@@ -1711,6 +1736,7 @@ static struct security_operations hifi_security_ops = {
 
 	HANDLE(socket_sendmsg),
 	HANDLE(socket_post_recvmsg),
+	HANDLE(skbqueue_append_data),
 	HANDLE(socket_sock_rcv_skb),
 	HANDLE(unix_may_send),
 	HANDLE(inet_conn_established),
