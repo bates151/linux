@@ -37,6 +37,7 @@
 #include <linux/tcp.h>
 #include <linux/route.h>
 #include <linux/module.h>
+#include <linux/security.h>
 #include <linux/slab.h>
 
 #include <linux/netfilter.h>
@@ -1330,6 +1331,11 @@ int ip6_append_data(struct sock *sk, int getfrag(void *from, char *to,
 	if ((skb = skb_peek_tail(&sk->sk_write_queue)) == NULL)
 		goto alloc_new_skb;
 
+	/* Queue is not empty, so check security now */
+	err = security_skbqueue_append_data(sk, skb_peek(&sk->sk_write_queue));
+	if (err)
+		goto error;
+
 	while (length > 0) {
 		/* Check if the remaining data fits into current packet. */
 		copy = (cork->length <= mtu && !(cork->flags & IPCORK_ALLFRAG) ? mtu : maxfraglen) - skb->len;
@@ -1406,6 +1412,14 @@ alloc_new_skb:
 			}
 			if (skb == NULL)
 				goto error;
+			/* Check security using new skb if queue was empty */
+			if (!skb_prev) {
+				err = security_skbqueue_append_data(sk, skb);
+				if (err) {
+					kfree_skb(skb);
+					goto error;
+				}
+			}
 			/*
 			 *	Fill in the control structures
 			 */

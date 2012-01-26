@@ -33,6 +33,7 @@
 #include <linux/icmpv6.h>
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/security.h>
 #include <linux/skbuff.h>
 #include <linux/slab.h>
 #include <asm/uaccess.h>
@@ -391,6 +392,9 @@ try_again:
 			goto csum_copy_err;
 	}
 	if (err)
+		goto out_free;
+
+	if ((err = security_udp_postrcv_skb(sk, skb)))
 		goto out_free;
 
 	if (!peeked) {
