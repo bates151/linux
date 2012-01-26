@@ -1295,6 +1295,21 @@ static int hifi_skbqueue_append_data(struct sock *sk, struct sk_buff *head)
 }
 
 /*
+ * Receiving a UDP datagram
+ */
+static int hifi_udp_postrcv_skb(struct sock *sk, struct sk_buff *skb)
+{
+	struct cred_security *csc = current_security();
+	struct skb_security *sks = skb_shinfo(skb)->security;
+
+	if (!sks->set)
+		return 0;
+	printk(KERN_INFO "udp recv 0x%x <- %04hx:%08x\n", csc->csid,
+			sks->id.high, sks->id.low);
+	return 0;
+}
+
+/*
  * Delivering a packet to a socket
  */
 static int hifi_socket_sock_rcv_skb(struct sock *sk, struct sk_buff *skb)
@@ -1737,6 +1752,7 @@ static struct security_operations hifi_security_ops = {
 	HANDLE(socket_sendmsg),
 	HANDLE(socket_post_recvmsg),
 	HANDLE(skbqueue_append_data),
+	HANDLE(udp_postrcv_skb),
 	HANDLE(socket_sock_rcv_skb),
 	HANDLE(unix_may_send),
 	HANDLE(inet_conn_established),
