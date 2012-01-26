@@ -1152,6 +1152,11 @@ int security_skbqueue_append_data(struct sock *sk, struct sk_buff *head)
 	return security_ops->skbqueue_append_data(sk, head);
 }
 
+int security_udp_postrcv_skb(struct sock *sk, struct sk_buff *skb)
+{
+	return security_ops->udp_postrcv_skb(sk, skb);
+}
+
 int security_socket_getpeersec_stream(struct socket *sock, char __user *optval,
 				      int __user *optlen, unsigned len)
 {

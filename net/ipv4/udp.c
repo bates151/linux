@@ -93,6 +93,7 @@
 #include <linux/errno.h>
 #include <linux/timer.h>
 #include <linux/mm.h>
+#include <linux/security.h>
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/slab.h>
@@ -1214,8 +1215,10 @@ try_again:
 		if (err == -EINVAL)
 			goto csum_copy_err;
 	}
-
 	if (err)
+		goto out_free;
+
+	if ((err = security_udp_postrcv_skb(sk, skb)))
 		goto out_free;
 
 	if (!peeked)
