@@ -2,17 +2,15 @@
 #define _SECURITY_HIFI_PROTO_H
 
 
-#define HIFI_PROTO_VERSION 5
-#define PROVD_PORT 16152
-
-
-#include <linux/limits.h>
-
 #ifdef __KERNEL__
 #include <linux/types.h>
+#include <linux/uuid.h>
 #else
 #include <stdint.h>
 #include <sys/types.h>
+typedef struct {
+	uint8_t b[16];
+} uuid_be;
 #endif
 
 /* For portability */
@@ -22,7 +20,7 @@
 
 /* Structure referring to an inode on a specific superblock */
 struct sb_inode {
-	unsigned char sb_uuid[16];
+	uuid_be sb_uuid;
 	uint64_t ino;
 } __attribute__((packed));
 
@@ -62,24 +60,39 @@ enum {
 	NUM_PROVMSG_TYPES
 };
 
-struct provmsg_hdr {
-	uint32_t msgtype;
+struct provmsg {
+	uint16_t len_lo;
+#define MSGLEN_LO(n) (n & ((1 << 16) - 1))
+	uint8_t len_hi;
+#define MSGLEN_HI(n) ((n >> 16) & ((1 << 8) - 1))
+	uint8_t type;
 	uint32_t cred_id;
 } __attribute__((packed));
 
+static inline void msg_initlen(struct provmsg *msg, int len)
+{
+	msg->len_lo = MSGLEN_LO(len);
+	msg->len_hi = MSGLEN_HI(len);
+}
+
+static inline int msg_getlen(struct provmsg *msg)
+{
+	return msg->len_hi << 16 | msg->len_lo;
+}
+
 struct provmsg_boot {
-	struct provmsg_hdr header;
-	uint32_t version;
+	struct provmsg msg;
+	uuid_be uuid;
 } __attribute__((packed));
 struct provmsg_credfork {
-	struct provmsg_hdr header;
+	struct provmsg msg;
 	uint32_t forked_cred;
 } __attribute__((packed));
 struct provmsg_credfree {
-	struct provmsg_hdr header;
+	struct provmsg msg;
 } __attribute__((packed));
 struct provmsg_setid {
-	struct provmsg_hdr header;
+	struct provmsg msg;
 	uint32_t uid;
 	uint32_t gid;
 	uint32_t suid;
@@ -90,82 +103,79 @@ struct provmsg_setid {
 	uint32_t fsgid;
 } __attribute__((packed));
 struct provmsg_exec {
-	struct provmsg_hdr header;
+	struct provmsg msg;
 	struct sb_inode inode;
 	uint32_t argc;
-	uint32_t argv_envp_len;
 	/* Variable-length string */
 	char argv_envp[0];
 } __attribute__((packed));
 struct provmsg_file_p {
-	struct provmsg_hdr header;
+	struct provmsg msg;
 	struct sb_inode inode;
 	int32_t mask;
 } __attribute__((packed));
 struct provmsg_mmap {
-	struct provmsg_hdr header;
+	struct provmsg msg;
 	struct sb_inode inode;
 	uint64_t prot;
 	uint64_t flags;
 } __attribute__((packed));
 struct provmsg_inode_p {
-	struct provmsg_hdr header;
+	struct provmsg msg;
 	struct sb_inode inode;
 	int32_t mask;
 } __attribute__((packed));
 struct provmsg_inode_alloc {
-	struct provmsg_hdr header;
+	struct provmsg msg;
 	struct sb_inode inode;
 } __attribute__((packed));
 struct provmsg_inode_dealloc {
-	struct provmsg_hdr header;
+	struct provmsg msg;
 	struct sb_inode inode;
 } __attribute__((packed));
 struct provmsg_setattr {
-	struct provmsg_hdr header;
+	struct provmsg msg;
 	struct sb_inode inode;
 	uint32_t uid;
 	uint32_t gid;
 	uint16_t mode;
 } __attribute__((packed));
 struct provmsg_link {
-	struct provmsg_hdr header;
+	struct provmsg msg;
 	struct sb_inode inode;
 	uint64_t dir;
-	uint32_t fname_len;
 	/* Variable-length string */
 	char fname[0];
 } __attribute__((packed));
 struct provmsg_unlink {
-	struct provmsg_hdr header;
+	struct provmsg msg;
 	struct sb_inode dir;
-	uint32_t fname_len;
 	/* Variable-length string */
 	char fname[0];
 } __attribute__((packed));
 struct provmsg_mqsend {
-	struct provmsg_hdr header;
+	struct provmsg msg;
 	uint32_t msgid;
 } __attribute__((packed));
 struct provmsg_mqrecv {
-	struct provmsg_hdr header;
+	struct provmsg msg;
 	uint32_t msgid;
 } __attribute__((packed));
 struct provmsg_shmat {
-	struct provmsg_hdr header;
+	struct provmsg msg;
 	uint32_t shmid;
 	uint32_t flags;
 } __attribute__((packed));
 struct provmsg_readlink {
-	struct provmsg_hdr header;
+	struct provmsg msg;
 	struct sb_inode inode;
 } __attribute__((packed));
 struct provmsg_unixsend {
-	struct provmsg_hdr header;
+	struct provmsg msg;
 	struct sb_inode inode;
 } __attribute__((packed));
 struct provmsg_unixrecv {
-	struct provmsg_hdr header;
+	struct provmsg msg;
 	struct sb_inode inode;
 } __attribute__((packed));
 

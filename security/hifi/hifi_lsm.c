@@ -27,6 +27,7 @@
 
 /* for generate_random_uuid */
 #include <linux/random.h>
+#include <linux/uuid.h>
 
 /* for relay support */
 #include <linux/debugfs.h>
@@ -148,16 +149,21 @@ static struct rchan_callbacks relay_callbacks = {
 };
 
 /* Initial messages */
-static const struct provmsg_boot init_bootmsg = {
-	.header.msgtype = PROVMSG_BOOT,
-	.header.cred_id = 0,
-	.version = HIFI_PROTO_VERSION,
+static uuid_be boot_uuid;
+static __initdata struct provmsg_boot init_bootmsg = {
+	.msg.len_lo = MSGLEN_LO(sizeof(struct provmsg_boot)),
+	.msg.len_hi = MSGLEN_HI(sizeof(struct provmsg_boot)),
+	.msg.type = PROVMSG_BOOT,
+	.msg.cred_id = 0,
+	/* .uuid is {0} to start with */
 };
 
-static const struct provmsg_setid init_setidmsg = {
-	.header.msgtype = PROVMSG_SETID,
-	.header.cred_id = 0,
-	/* Static, so all IDs are (correctly) inited to 0 */
+static __initdata struct provmsg_setid init_setidmsg = {
+	.msg.len_lo = MSGLEN_LO(sizeof(struct provmsg_setid)),
+	.msg.len_hi = MSGLEN_HI(sizeof(struct provmsg_setid)),
+	.msg.type = PROVMSG_SETID,
+	.msg.cred_id = 0,
+	/* Static, so all IDs are (correctly) inited to 0=root */
 };
 
 /*
@@ -169,6 +175,7 @@ static int __init hifi_init_relay(void)
 			bufs, &relay_callbacks, NULL);
 	if (!relay)
 		panic("Hi-Fi: Could not create relay");
+	init_bootmsg.uuid = boot_uuid;
 	write_to_relay(&init_bootmsg, sizeof(init_bootmsg));
 	write_to_relay(&init_setidmsg, sizeof(init_setidmsg));
 	printk(KERN_INFO "Hi-Fi: Replaying boot buffer: %uB\n", boot_bytes);
@@ -408,8 +415,9 @@ static void cred_security_init(struct cred_security *csec,
 	struct provmsg_credfork buf;
 	csec->flags = CSEC_INITED;
 
-	buf.header.msgtype = PROVMSG_CREDFORK;
-	buf.header.cred_id = old->csid;
+	msg_initlen(&buf.msg, sizeof(buf));
+	buf.msg.type = PROVMSG_CREDFORK;
+	buf.msg.cred_id = old->csid;
 	buf.forked_cred = csec->csid;
 	write_to_relay(&buf, sizeof(buf));
 }
@@ -430,8 +438,9 @@ static void cred_security_destroy(struct kref *ref)
 
 	if (!inited)
 		return;
-	buf.header.msgtype = PROVMSG_CREDFREE;
-	buf.header.cred_id = id;
+	msg_initlen(&buf.msg, sizeof(buf));
+	buf.msg.type = PROVMSG_CREDFREE;
+	buf.msg.cred_id = id;
 	write_to_relay(&buf, sizeof(buf));
 }
 
@@ -539,9 +548,9 @@ static int hifi_task_fix_setuid(struct cred *new, const struct cred *old,
 	if (csec->flags & CSEC_OPAQUE)
 		return cap_task_fix_setuid(new, old, flags);
 
-	csec = new->security;
-	buf.header.msgtype = PROVMSG_SETID;
-	buf.header.cred_id = csec->csid;
+	msg_initlen(&buf.msg, sizeof(buf));
+	buf.msg.type = PROVMSG_SETID;
+	buf.msg.cred_id = csec->csid;
 	buf.uid = new->uid;
 	buf.gid = new->gid;
 	buf.suid = new->suid;
@@ -568,7 +577,7 @@ static int hifi_bprm_check_security(struct linux_binprm *bprm)
 	const struct sb_security *sbs;
 	struct provmsg_exec *msg;
 	char xattr[7];
-	unsigned long bytes;
+	unsigned long len;
 
 	/* Don't worry about the internal forkings etc. of opaque programs */
 	if (cursec->flags & CSEC_OPAQUE)
@@ -584,27 +593,27 @@ static int hifi_bprm_check_security(struct linux_binprm *bprm)
 			newsec->flags |= CSEC_OPAQUE;
 	}
 
-	bytes = bprm->exec - bprm->p;
-	msg = kmalloc(sizeof(*msg) + bytes, GFP_KERNEL);
+	len = bprm->exec - bprm->p;
+	msg = kmalloc(sizeof(*msg) + len, GFP_KERNEL);
 	if (!msg) {
 		printk(KERN_ERR "Hi-Fi: Failed to allocate exec message\n");
 		return -ENOMEM;
 	}
-	rv = copy_bytes_bprm(bprm, msg->argv_envp, bytes);
+	rv = copy_bytes_bprm(bprm, msg->argv_envp, len);
 	if (rv < 0) {
 		printk(KERN_ERR "Hi-Fi: Exec copy failed %d\n", rv);
 		goto out;
 	}
-	msg->argv_envp_len = bytes;
+	msg_initlen(&msg->msg, sizeof(*msg) + len);
+	msg->msg.type = PROVMSG_EXEC;
+	msg->msg.cred_id = newsec->csid;
 	msg->argc = bprm->argc;
-	msg->header.msgtype = PROVMSG_EXEC;
-	msg->header.cred_id = newsec->csid;
 
 	sbs = bprm->file->f_dentry->d_sb->s_security;
-	memcpy(msg->inode.sb_uuid, sbs->uuid, sizeof(msg->inode.sb_uuid));
+	msg->inode.sb_uuid = sbs->uuid;
 	msg->inode.ino = bprm->file->f_dentry->d_inode->i_ino;
 
-	write_to_relay(msg, sizeof(*msg) + msg->argv_envp_len);
+	write_to_relay(msg, sizeof(*msg) + len);
 	rv = 0;
 out:
 	kfree(msg);
@@ -622,8 +631,9 @@ static void hifi_bprm_committing_creds(struct linux_binprm *bprm)
 	if (csec->flags & CSEC_OPAQUE)
 		return;
 
-	buf.header.msgtype = PROVMSG_SETID;
-	buf.header.cred_id = csec->csid;
+	msg_initlen(&buf.msg, sizeof(buf));
+	buf.msg.type = PROVMSG_SETID;
+	buf.msg.cred_id = csec->csid;
 	buf.uid = bprm->cred->uid;
 	buf.gid = bprm->cred->gid;
 	buf.suid = bprm->cred->suid;
@@ -668,12 +678,12 @@ static int hifi_sb_kern_mount(struct super_block *sb, int flags, void *data)
 		 */
 		printk(KERN_WARNING "Hi-Fi: no xattr/tmpfs: "
 		                            "%s\n", sb->s_type->name);
-		generate_random_uuid(sbs->uuid);
+		generate_random_uuid(sbs->uuid.b);
 		goto out;
 	}
 
 	mutex_lock(&i_root->i_mutex);
-	rv = i_root->i_op->getxattr(d_root, XATTR_NAME_HIFI, sbs->uuid, 16);
+	rv = i_root->i_op->getxattr(d_root, XATTR_NAME_HIFI, &sbs->uuid, 16);
 	mutex_unlock(&i_root->i_mutex);
 
 	if (rv == 16) {
@@ -716,32 +726,31 @@ static int hifi_inode_init_security(struct inode *inode, struct inode *dir,
 	cursec = current_security();
 	sbs = inode->i_sb->s_security;
 
-	allocmsg.header.msgtype = PROVMSG_INODE_ALLOC;
-	allocmsg.header.cred_id = cursec->csid;
-
-	attrmsg.header.msgtype = PROVMSG_SETATTR;
-	attrmsg.header.cred_id = cursec->csid;
-
-	linkmsg->header.msgtype = PROVMSG_LINK;
-	linkmsg->header.cred_id = cursec->csid;
-
-	memcpy(allocmsg.inode.sb_uuid, sbs->uuid,
-			sizeof(allocmsg.inode.sb_uuid));
+	msg_initlen(&allocmsg.msg, sizeof(allocmsg));
+	allocmsg.msg.type = PROVMSG_INODE_ALLOC;
+	allocmsg.msg.cred_id = cursec->csid;
+	allocmsg.inode.sb_uuid = sbs->uuid;
 	allocmsg.inode.ino = inode->i_ino;
-	memcpy(&attrmsg.inode, &allocmsg.inode, sizeof(attrmsg.inode));
-	memcpy(&linkmsg->inode, &allocmsg.inode, sizeof(linkmsg->inode));
 
+	msg_initlen(&attrmsg.msg, sizeof(attrmsg));
+	attrmsg.msg.type = PROVMSG_SETATTR;
+	attrmsg.msg.cred_id = cursec->csid;
+	attrmsg.inode = allocmsg.inode;
 	attrmsg.uid = inode->i_uid;
 	attrmsg.gid = inode->i_gid;
 	attrmsg.mode = inode->i_mode;
 
+	msg_initlen(&linkmsg->msg, sizeof(*linkmsg) + qstr->len);
+	linkmsg->msg.type = PROVMSG_LINK;
+	linkmsg->msg.cred_id = cursec->csid;
+	linkmsg->inode = allocmsg.inode;
 	linkmsg->dir = dir->i_ino;
-	linkmsg->fname_len = qstr->len;
-	memcpy(linkmsg->fname, qstr->name, linkmsg->fname_len);
+	memcpy(linkmsg->fname, qstr->name, qstr->len);
 
+	// XXX allocate one block and write as a unit
 	write_to_relay(&allocmsg, sizeof(allocmsg));
 	write_to_relay(&attrmsg, sizeof(attrmsg));
-	write_to_relay(linkmsg, sizeof(*linkmsg) + linkmsg->fname_len);
+	write_to_relay(linkmsg, sizeof(*linkmsg) + qstr->len);
 	kfree(linkmsg);
 
 	return -EOPNOTSUPP;
@@ -752,19 +761,17 @@ static int hifi_inode_init_security(struct inode *inode, struct inode *dir,
  */
 static void hifi_inode_free_security(struct inode *inode)
 {
-	const struct cred_security *cursec;
-	const struct sb_security *sbs;
+	const struct cred_security *cursec = current_security();
+	const struct sb_security *sbs = inode->i_sb->s_security;
 	struct provmsg_inode_dealloc msg;
 
 	if (inode->i_nlink != 0)
 		return;
 
-	cursec = current_security();
-	msg.header.msgtype = PROVMSG_INODE_DEALLOC;
-	msg.header.cred_id = cursec->csid;
-
-	sbs = inode->i_sb->s_security;
-	memcpy(msg.inode.sb_uuid, sbs->uuid, sizeof(msg.inode.sb_uuid));
+	msg_initlen(&msg.msg, sizeof(msg));
+	msg.msg.type = PROVMSG_INODE_DEALLOC;
+	msg.msg.cred_id = cursec->csid;
+	msg.inode.sb_uuid = sbs->uuid;
 	msg.inode.ino = inode->i_ino;
 
 	write_to_relay(&msg, sizeof(msg));
@@ -783,15 +790,16 @@ static int hifi_inode_permission(struct inode *inode, int mask)
 	if (cursec->flags & CSEC_OPAQUE)
 		return 0;
 
-	msg.header.msgtype = PROVMSG_INODE_P;
-	msg.header.cred_id = cursec->csid;
+	msg_initlen(&msg.msg, sizeof(msg));
+	msg.msg.type = PROVMSG_INODE_P;
+	msg.msg.cred_id = cursec->csid;
 
 	if (inode) {
 		sbs = inode->i_sb->s_security;
-		memcpy(msg.inode.sb_uuid, sbs->uuid, sizeof(msg.inode.sb_uuid));
+		msg.inode.sb_uuid = sbs->uuid;
 		msg.inode.ino = inode->i_ino;
 	} else {
-		memset(msg.inode.sb_uuid, 0, sizeof(msg.inode.sb_uuid));
+		msg.inode.sb_uuid = NULL_UUID_BE;
 		msg.inode.ino = 0;
 	}
 
@@ -809,22 +817,23 @@ static int hifi_inode_link(struct dentry *old_dentry, struct inode *dir,
 	const struct cred_security *cursec = current_security();
 	const struct sb_security *sbs;
 	struct provmsg_link *msg;
+	int len = new_dentry->d_name.len;
 
-	msg = kmalloc(sizeof(*msg) + new_dentry->d_name.len, GFP_KERNEL);
+	msg = kmalloc(sizeof(*msg) + len, GFP_KERNEL);
 	if (!msg)
 		return -ENOMEM;
 
-	msg->header.msgtype = PROVMSG_LINK;
-	msg->header.cred_id = cursec->csid;
+	msg_initlen(&msg->msg, sizeof(*msg) + len);
+	msg->msg.type = PROVMSG_LINK;
+	msg->msg.cred_id = cursec->csid;
 
 	sbs = old_dentry->d_sb->s_security;
-	memcpy(msg->inode.sb_uuid, sbs->uuid, sizeof(msg->inode.sb_uuid));
+	msg->inode.sb_uuid = sbs->uuid;
 	msg->inode.ino = old_dentry->d_inode->i_ino;
 	msg->dir = dir->i_ino;
-	msg->fname_len = new_dentry->d_name.len;
-	memcpy(msg->fname, new_dentry->d_name.name, msg->fname_len);
+	memcpy(msg->fname, new_dentry->d_name.name, len);
 
-	write_to_relay(msg, sizeof(*msg) + msg->fname_len);
+	write_to_relay(msg, sizeof(*msg) + len);
 	kfree(msg);
 	return 0;
 }
@@ -837,21 +846,22 @@ static int hifi_inode_unlink(struct inode *dir, struct dentry *dentry)
 	const struct cred_security *cursec = current_security();
 	const struct sb_security *sbs;
 	struct provmsg_unlink *msg;
+	int len = dentry->d_name.len;
 
-	msg = kmalloc(sizeof(*msg) + dentry->d_name.len, GFP_KERNEL);
+	msg = kmalloc(sizeof(*msg) + len, GFP_KERNEL);
 	if (!msg)
 		return -ENOMEM;
 
-	msg->header.msgtype = PROVMSG_UNLINK;
-	msg->header.cred_id = cursec->csid;
+	msg_initlen(&msg->msg, sizeof(*msg) + len);
+	msg->msg.type = PROVMSG_UNLINK;
+	msg->msg.cred_id = cursec->csid;
 
 	sbs = dir->i_sb->s_security;
-	memcpy(msg->dir.sb_uuid, sbs->uuid, sizeof(msg->dir.sb_uuid));
+	msg->dir.sb_uuid = sbs->uuid;
 	msg->dir.ino = dir->i_ino;
-	msg->fname_len = dentry->d_name.len;
-	memcpy(msg->fname, dentry->d_name.name, msg->fname_len);
+	memcpy(msg->fname, dentry->d_name.name, len);
 
-	write_to_relay(msg, sizeof(*msg) + msg->fname_len);
+	write_to_relay(msg, sizeof(*msg) + len);
 	kfree(msg);
 	return 0;
 }
@@ -863,43 +873,39 @@ static int hifi_inode_rename(struct inode *old_dir, struct dentry *old_dentry,
 		struct inode *new_dir, struct dentry *new_dentry)
 {
 	const struct cred_security *cursec = current_security();
-	const struct sb_security *sbs;
+	const struct sb_security *sbs = old_dentry->d_sb->s_security;
 	struct provmsg_link *linkmsg;
 	struct provmsg_unlink *unlinkmsg;
+	int oldlen = old_dentry->d_name.len;
+	int newlen = new_dentry->d_name.len;
 
-	linkmsg = kmalloc(sizeof(*linkmsg) + new_dentry->d_name.len, GFP_KERNEL);
+	linkmsg = kmalloc(sizeof(*linkmsg) + newlen, GFP_KERNEL);
 	if (!linkmsg)
 		return -ENOMEM;
-	unlinkmsg = kmalloc(sizeof(*unlinkmsg) + old_dentry->d_name.len,
-			GFP_KERNEL);
+	unlinkmsg = kmalloc(sizeof(*unlinkmsg) + oldlen, GFP_KERNEL);
 	if (!unlinkmsg) {
 		kfree(linkmsg);
 		return -ENOMEM;
 	}
 
-	linkmsg->header.msgtype = PROVMSG_LINK;
-	unlinkmsg->header.msgtype = PROVMSG_UNLINK;
-	linkmsg->header.cred_id =
-		unlinkmsg->header.cred_id =
-		cursec->csid;
-
-	sbs = old_dentry->d_sb->s_security;
-	memcpy(linkmsg->inode.sb_uuid, sbs->uuid,
-			sizeof(linkmsg->inode.sb_uuid));
-	memcpy(unlinkmsg->dir.sb_uuid, sbs->uuid,
-			sizeof(unlinkmsg->dir.sb_uuid));
+	msg_initlen(&linkmsg->msg, sizeof(*linkmsg) + newlen);
+	linkmsg->msg.type = PROVMSG_LINK;
+	linkmsg->msg.cred_id = cursec->csid;
+	linkmsg->inode.sb_uuid = sbs->uuid;
 	linkmsg->inode.ino = old_dentry->d_inode->i_ino;
-
 	linkmsg->dir = new_dir->i_ino;
-	linkmsg->fname_len = new_dentry->d_name.len;
-	memcpy(linkmsg->fname, new_dentry->d_name.name, linkmsg->fname_len);
+	memcpy(linkmsg->fname, new_dentry->d_name.name, newlen);
 
+	msg_initlen(&unlinkmsg->msg, sizeof(*unlinkmsg) + oldlen);
+	unlinkmsg->msg.type = PROVMSG_UNLINK;
+	unlinkmsg->msg.cred_id = cursec->csid;
+	unlinkmsg->dir.sb_uuid = sbs->uuid;
 	unlinkmsg->dir.ino = old_dir->i_ino;
-	unlinkmsg->fname_len = old_dentry->d_name.len;
-	memcpy(unlinkmsg->fname, old_dentry->d_name.name, unlinkmsg->fname_len);
+	memcpy(unlinkmsg->fname, old_dentry->d_name.name, oldlen);
 
-	write_to_relay(linkmsg, sizeof(*linkmsg) + linkmsg->fname_len);
-	write_to_relay(unlinkmsg, sizeof(*unlinkmsg) + unlinkmsg->fname_len);
+	// XXX Allocate together and write as a unit
+	write_to_relay(linkmsg, sizeof(*linkmsg) + newlen);
+	write_to_relay(unlinkmsg, sizeof(*unlinkmsg) + oldlen);
 	kfree(unlinkmsg);
 	kfree(linkmsg);
 	return 0;
@@ -911,22 +917,18 @@ static int hifi_inode_rename(struct inode *old_dir, struct dentry *old_dentry,
  */
 int hifi_inode_setattr(struct dentry *dentry, struct iattr *attr)
 {
-	const struct cred_security *cursec;
-	const struct sb_security *sbs;
-	const struct inode *i;
+	const struct cred_security *cursec = current_security();
+	const struct sb_security *sbs = dentry->d_sb->s_security;
+	const struct inode *i = dentry->d_inode;
 	struct provmsg_setattr msg;
 
 	if ((attr->ia_valid & (ATTR_MODE | ATTR_UID | ATTR_GID)) == 0)
 		return 0;
 
-	cursec = current_security();
-	msg.header.msgtype = PROVMSG_SETATTR;
-	msg.header.cred_id = cursec->csid;
-
-	sbs = dentry->d_sb->s_security;
-	memcpy(msg.inode.sb_uuid, sbs->uuid, sizeof(msg.inode.sb_uuid));
-
-	i = dentry->d_inode;
+	msg_initlen(&msg.msg, sizeof(msg));
+	msg.msg.type = PROVMSG_SETATTR;
+	msg.msg.cred_id = cursec->csid;
+	msg.inode.sb_uuid = sbs->uuid;
 	msg.inode.ino = i->i_ino;
 	msg.uid = (attr->ia_valid & ATTR_UID) ? attr->ia_uid : i->i_uid;
 	msg.gid = (attr->ia_valid & ATTR_GID) ? attr->ia_gid : i->i_gid;
@@ -943,25 +945,19 @@ int hifi_inode_setattr(struct dentry *dentry, struct iattr *attr)
 static int hifi_inode_readlink(struct dentry *dentry)
 {
 	const struct cred_security *cursec = current_security();
-	const struct sb_security *sbs;
-	struct provmsg_readlink *msg;
+	const struct sb_security *sbs = dentry->d_sb->s_security;
+	struct provmsg_readlink msg;
 
 	if (cursec->flags & CSEC_OPAQUE)
 		return 0;
 
-	msg = kmalloc(sizeof(*msg), GFP_KERNEL);
-	if (!msg)
-		return -ENOMEM;
+	msg_initlen(&msg.msg, sizeof(msg));
+	msg.msg.type = PROVMSG_READLINK;
+	msg.msg.cred_id = cursec->csid;
+	msg.inode.sb_uuid = sbs->uuid;
+	msg.inode.ino = dentry->d_inode->i_ino;
 
-	msg->header.msgtype = PROVMSG_READLINK;
-	msg->header.cred_id = cursec->csid;
-
-	sbs = dentry->d_sb->s_security;
-	memcpy(msg->inode.sb_uuid, sbs->uuid, sizeof(msg->inode.sb_uuid));
-	msg->inode.ino = dentry->d_inode->i_ino;
-
-	write_to_relay(msg, sizeof(*msg));
-	kfree(msg);
+	write_to_relay(&msg, sizeof(msg));
 	return 0;
 }
 
@@ -978,15 +974,16 @@ static int hifi_file_permission(struct file *file, int mask)
 	if (cursec->flags & CSEC_OPAQUE)
 		return 0;
 
-	msg.header.msgtype = PROVMSG_FILE_P;
-	msg.header.cred_id = cursec->csid;
+	msg_initlen(&msg.msg, sizeof(msg));
+	msg.msg.type = PROVMSG_FILE_P;
+	msg.msg.cred_id = cursec->csid;
 
 	if (file && file->f_dentry && file->f_dentry->d_inode) {
 		sbs = file->f_dentry->d_sb->s_security;
-		memcpy(msg.inode.sb_uuid, sbs->uuid, sizeof(msg.inode.sb_uuid));
+		msg.inode.sb_uuid = sbs->uuid;
 		msg.inode.ino = file->f_dentry->d_inode->i_ino;
 	} else {
-		memset(msg.inode.sb_uuid, 0, sizeof(msg.inode.sb_uuid));
+		msg.inode.sb_uuid = NULL_UUID_BE;
 		msg.inode.ino = 0;
 	}
 
@@ -1013,15 +1010,16 @@ static int hifi_file_mmap(struct file *file, unsigned long reqprot,
 	if (cursec->flags & CSEC_OPAQUE)
 		return 0;
 
-	msg.header.msgtype = PROVMSG_MMAP;
-	msg.header.cred_id = cursec->csid;
+	msg_initlen(&msg.msg, sizeof(msg));
+	msg.msg.type = PROVMSG_MMAP;
+	msg.msg.cred_id = cursec->csid;
 
 	if (file && file->f_dentry && file->f_dentry->d_inode) {
 		sbs = file->f_dentry->d_sb->s_security;
-		memcpy(msg.inode.sb_uuid, sbs->uuid, sizeof(msg.inode.sb_uuid));
+		msg.inode.sb_uuid = sbs->uuid;
 		msg.inode.ino = file->f_dentry->d_inode->i_ino;
 	} else {
-		memset(msg.inode.sb_uuid, 0, sizeof(msg.inode.sb_uuid));
+		msg.inode.sb_uuid = NULL_UUID_BE;
 		msg.inode.ino = 0;
 	}
 
@@ -1051,8 +1049,9 @@ static int hifi_shm_shmat(struct shmid_kernel *shp, char __user *shmaddr,
 	if (cursec->flags & CSEC_OPAQUE)
 		return 0;
 
-	msg.header.msgtype = PROVMSG_SHMAT;
-	msg.header.cred_id = cursec->csid;
+	msg_initlen(&msg.msg, sizeof(msg));
+	msg.msg.type = PROVMSG_SHMAT;
+	msg.msg.cred_id = cursec->csid;
 	msg.shmid = shmsec->shmid;
 	msg.flags = shmflg;
 
@@ -1073,8 +1072,9 @@ static int hifi_msg_queue_msgsnd(struct msg_queue *msq, struct msg_msg *msg,
 	if (cursec->flags & CSEC_OPAQUE)
 		return 0;
 
-	logmsg.header.msgtype = PROVMSG_MQSEND;
-	logmsg.header.cred_id = cursec->csid;
+	msg_initlen(&logmsg.msg, sizeof(logmsg));
+	logmsg.msg.type = PROVMSG_MQSEND;
+	logmsg.msg.cred_id = cursec->csid;
 	logmsg.msgid = msgsec->msgid;
 
 	write_to_relay(&logmsg, sizeof(logmsg));
@@ -1093,8 +1093,9 @@ static int hifi_msg_queue_msgrcv(struct msg_queue *msq, struct msg_msg *msg,
 	if (cursec->flags & CSEC_OPAQUE)
 		return 0;
 
-	logmsg.header.msgtype = PROVMSG_MQRECV;
-	logmsg.header.cred_id = cursec->csid;
+	msg_initlen(&logmsg.msg, sizeof(logmsg));
+	logmsg.msg.type = PROVMSG_MQRECV;
+	logmsg.msg.cred_id = cursec->csid;
 	logmsg.msgid = msgsec->msgid;
 
 	write_to_relay(&logmsg, sizeof(logmsg));
@@ -1114,18 +1115,13 @@ static int hifi_msg_queue_msgrcv(struct msg_queue *msq, struct msg_msg *msg,
 static int send_unix_dgram(struct socket *sock, struct socket *other)
 {
 	const struct cred_security *cursec = current_security();
-	struct sb_security *sbs;
+	struct sb_security *sbs = SOCK_INODE(other)->i_sb->s_security;
 	struct provmsg_unixsend msg;
 
-	/* Only use this function for connectionless sockets */
-	if (sock->sk->sk_family != AF_UNIX || sock->sk->sk_type != SOCK_DGRAM)
-		return 0;
-
-	msg.header.msgtype = PROVMSG_UNIXSEND;
-	msg.header.cred_id = cursec->csid;
-
-	sbs = SOCK_INODE(other)->i_sb->s_security;
-	memcpy(msg.inode.sb_uuid, sbs->uuid, sizeof(msg.inode.sb_uuid));
+	msg_initlen(&msg.msg, sizeof(msg));
+	msg.msg.type = PROVMSG_UNIXSEND;
+	msg.msg.cred_id = cursec->csid;
+	msg.inode.sb_uuid = sbs->uuid;
 	msg.inode.ino = SOCK_INODE(other)->i_ino;
 
 	write_to_relay(&msg, sizeof(msg));
@@ -1138,12 +1134,11 @@ static int send_unix_dgram(struct socket *sock, struct socket *other)
 static int send_unix_connmode(struct socket *sock, struct msghdr *msg, int size)
 {
 	const struct cred_security *cursec = current_security();
-	struct sock *peer;
+	struct sock *peer = unix_sk(sock->sk)->peer;
 	struct socket *peersock;
 	struct sb_security *sbs;
 	struct provmsg_unixsend logmsg;
 
-	peer = unix_sk(sock->sk)->peer;
 	/* Socket is not connected.  Will return with ENOTCONN. */
 	if (!peer)
 		return 0;
@@ -1154,16 +1149,18 @@ static int send_unix_connmode(struct socket *sock, struct msghdr *msg, int size)
 	 * need to figure out how to either get the peer inode or wait for the
 	 * peer to be fully initialized.  Something.
 	 */
+	/* TODO Using sk_security instead of ino will fix this! */
 	if (!peersock) {
 		printk(KERN_WARNING "Socket send before peer is inited\n");
 		return 0;
 	}
 
-	logmsg.header.msgtype = PROVMSG_UNIXSEND;
-	logmsg.header.cred_id = cursec->csid;
+	msg_initlen(&logmsg.msg, sizeof(logmsg));
+	logmsg.msg.type = PROVMSG_UNIXSEND;
+	logmsg.msg.cred_id = cursec->csid;
 
 	sbs = SOCK_INODE(peersock)->i_sb->s_security;
-	memcpy(logmsg.inode.sb_uuid, sbs->uuid, sizeof(logmsg.inode.sb_uuid));
+	logmsg.inode.sb_uuid = sbs->uuid;
 	logmsg.inode.ino = SOCK_INODE(peersock)->i_ino;
 
 	write_to_relay(&logmsg, sizeof(logmsg));
@@ -1177,14 +1174,13 @@ static void recv_unix_msg(struct socket *sock, struct msghdr *msg, int size,
 		int flags)
 {
 	const struct cred_security *cursec = current_security();
-	struct sb_security *sbs;
+	struct sb_security *sbs = SOCK_INODE(sock)->i_sb->s_security;
 	struct provmsg_unixrecv logmsg;
 
-	logmsg.header.msgtype = PROVMSG_UNIXRECV;
-	logmsg.header.cred_id = cursec->csid;
-
-	sbs = SOCK_INODE(sock)->i_sb->s_security;
-	memcpy(logmsg.inode.sb_uuid, sbs->uuid, sizeof(logmsg.inode.sb_uuid));
+	msg_initlen(&logmsg.msg, sizeof(logmsg));
+	logmsg.msg.type = PROVMSG_UNIXRECV;
+	logmsg.msg.cred_id = cursec->csid;
+	logmsg.inode.sb_uuid = sbs->uuid;
 	logmsg.inode.ino = SOCK_INODE(sock)->i_ino;
 
 	write_to_relay(&logmsg, sizeof(logmsg));
@@ -1652,12 +1648,13 @@ static void hifi_skb_shinfo_free_security(struct sk_buff *skb, int recycling)
 static int hifi_skb_shinfo_copy(struct sk_buff *skb,
 		struct skb_shared_info *shinfo, gfp_t gfp)
 {
+	struct skb_security *oldsec = skb_shinfo(skb)->security;
 	struct skb_security *sec;
 
 	sec = kmalloc(sizeof(*sec), gfp);
 	if (!sec)
 		return -ENOMEM;
-	memcpy(sec, skb_shinfo(skb)->security, sizeof(*sec));
+	*sec = *oldsec;
 	shinfo->security = sec;
 	return 0;
 }
@@ -1721,6 +1718,7 @@ static struct security_operations hifi_security_ops = {
 	.name    = "hifi",
 
 	/* Provenance-generating hooks */
+#define HANDLE(HOOK) .HOOK = hifi_##HOOK
 
 	HANDLE(cred_prepare),
 	HANDLE(cred_alloc_blank),
@@ -1792,6 +1790,8 @@ static int __init hifi_init(void)
 		return rv;
 	if (set_init_creds())
 		panic("Hi-Fi: Failed to allocate creds for initial task.");
+	/* Generate a random boot UUID */
+	generate_random_uuid(boot_uuid.b);
 
 	/* Finally register */
 	if (register_security(&hifi_security_ops))

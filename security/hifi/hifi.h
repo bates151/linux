@@ -4,6 +4,7 @@
 
 #include <linux/types.h>
 #include <linux/xattr.h>
+#include <linux/uuid.h>
 
 #include "hifi_proto.h"
 
@@ -12,14 +13,8 @@
 #define XATTR_HIFI_SUFFIX "hifi"
 #define XATTR_NAME_HIFI XATTR_SECURITY_PREFIX XATTR_HIFI_SUFFIX
 
-
 /* IP options number */
 #define IPOPT_HIFI 0x9e
-
-
-/* Shortcut for security_operations */
-#define HANDLE(HOOK) .HOOK = hifi_##HOOK
-
 
 
 /*
@@ -42,7 +37,7 @@ struct cred_security {
  * with no such label, we create one and store it ourselves.
  */
 struct sb_security {
-	unsigned char uuid[16];
+	uuid_be uuid;
 };
 
 
