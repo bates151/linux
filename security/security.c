@@ -1051,6 +1051,12 @@ int security_unix_may_send(struct socket *sock,  struct socket *other)
 }
 EXPORT_SYMBOL(security_unix_may_send);
 
+int security_unix_stream_send(struct socket *sock, struct sock *other)
+{
+	return security_ops->unix_stream_send(sock, other);
+}
+EXPORT_SYMBOL(security_unix_stream_send);
+
 int security_socket_create(int family, int type, int protocol, int kern)
 {
 	return security_ops->socket_create(family, type, protocol, kern);

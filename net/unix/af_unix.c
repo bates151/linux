@@ -1674,6 +1674,8 @@ static int unix_stream_sendmsg(struct kiocb *kiocb, struct socket *sock,
 			goto pipe_err_free;
 
 		maybe_add_creds(skb, sock, other);
+		if ((err = security_unix_stream_send(sock, other)))
+			goto pipe_err_free;
 		skb_queue_tail(&other->sk_receive_queue, skb);
 		if (max_level > unix_sk(other)->recursion_level)
 			unix_sk(other)->recursion_level = max_level;
