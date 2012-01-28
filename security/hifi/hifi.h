@@ -53,14 +53,15 @@ struct shm_security {
 
 /* Security structures for sockets */
 struct sock_security {
-	struct sockid local_id;
-	struct sockid remote_id;
-	u8 local_set:1, remote_set:1;
+	struct host_sockid full_id;
+	struct sockid short_id;
+	u8 full_set;
+	u8 short_set;
 };
 
 struct skb_security {
-	struct sockid id;
-	u8 set:1;
+	struct host_sockid id;
+	u8 set;
 };
 
 
@@ -68,7 +69,7 @@ struct skb_security {
 struct sockid_opt {
 	u8 num;
 	u8 len;
-	struct sockid label;
+	struct host_sockid label;
 } __attribute__((packed));
 
 

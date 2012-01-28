@@ -24,14 +24,15 @@ struct sb_inode {
 	uint64_t ino;
 } __attribute__((packed));
 
-/* Structure referring to a receive queue on a specific system */
+/* Structures referring to a receive queue on a specific system */
 struct sockid {
-	// XXX Pay attention to network-order-ness of this???
-	// XXX for now
-	//unsigned char host_uuid[16];
-	/* Highest 16 bits are not used */
-	uint16_t high;
 	uint32_t low;
+	uint16_t high;
+} __attribute__((packed));
+
+struct host_sockid {
+	struct sockid sock;
+	uuid_be host;
 } __attribute__((packed));
 
 
@@ -54,8 +55,9 @@ enum {
 	PROVMSG_MQRECV,
 	PROVMSG_SHMAT,
 	PROVMSG_READLINK,
-	PROVMSG_UNIXSEND,
-	PROVMSG_UNIXRECV,
+	PROVMSG_SOCKSEND,
+	PROVMSG_SOCKRECV,
+	PROVMSG_SOCKALIAS,
 
 	NUM_PROVMSG_TYPES
 };
@@ -170,13 +172,18 @@ struct provmsg_readlink {
 	struct provmsg msg;
 	struct sb_inode inode;
 } __attribute__((packed));
-struct provmsg_unixsend {
+struct provmsg_socksend {
 	struct provmsg msg;
-	struct sb_inode inode;
+	struct sockid peer;
 } __attribute__((packed));
-struct provmsg_unixrecv {
+struct provmsg_sockrecv {
 	struct provmsg msg;
-	struct sb_inode inode;
+	struct host_sockid sock;
+} __attribute__((packed));
+struct provmsg_sockalias {
+	struct provmsg msg;
+	struct host_sockid sock;
+	struct host_sockid alias;
 } __attribute__((packed));
 
 #endif

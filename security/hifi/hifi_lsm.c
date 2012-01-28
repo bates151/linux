@@ -312,7 +312,8 @@ static void next_sockid(struct sockid *label)
 /*
  * Reads the label off of the packet in skb.
  */
-static int get_packet_label(const struct sk_buff *skb, struct sockid *label)
+static int get_packet_label(const struct sk_buff *skb,
+		struct host_sockid *label)
 {
 	struct iphdr *iph = ip_hdr(skb);
 	u8 *p, *end;
@@ -383,8 +384,9 @@ static int label_packet(struct sk_buff *skb, const struct sockid *label)
 
 	ipopt = (struct sockid_opt *)(iph + 1);
 	ipopt->num = IPOPT_HIFI;
-	ipopt->len = sizeof(ipopt);
-	ipopt->label = *label;
+	ipopt->len = sizeof(*ipopt);
+	ipopt->label.host = boot_uuid;
+	ipopt->label.sock = *label;
 
 	if (len_delta < 0) {
 		/* Nopping case */
@@ -1115,14 +1117,13 @@ static int hifi_msg_queue_msgrcv(struct msg_queue *msq, struct msg_msg *msg,
 static int send_unix_dgram(struct socket *sock, struct socket *other)
 {
 	const struct cred_security *cursec = current_security();
-	struct sb_security *sbs = SOCK_INODE(other)->i_sb->s_security;
-	struct provmsg_unixsend msg;
+	const struct sock_security *osec = other->sk->sk_security;
+	struct provmsg_socksend msg;
 
 	msg_initlen(&msg.msg, sizeof(msg));
-	msg.msg.type = PROVMSG_UNIXSEND;
+	msg.msg.type = PROVMSG_SOCKSEND;
 	msg.msg.cred_id = cursec->csid;
-	msg.inode.sb_uuid = sbs->uuid;
-	msg.inode.ino = SOCK_INODE(other)->i_ino;
+	msg.peer = osec->short_id;
 
 	write_to_relay(&msg, sizeof(msg));
 	return 0;
@@ -1134,34 +1135,19 @@ static int send_unix_dgram(struct socket *sock, struct socket *other)
 static int send_unix_connmode(struct socket *sock, struct msghdr *msg, int size)
 {
 	const struct cred_security *cursec = current_security();
-	struct sock *peer = unix_sk(sock->sk)->peer;
-	struct socket *peersock;
-	struct sb_security *sbs;
-	struct provmsg_unixsend logmsg;
+	const struct sock *peer = unix_sk(sock->sk)->peer;
+	const struct sock_security *psec;
+	struct provmsg_socksend logmsg;
 
 	/* Socket is not connected.  Will return with ENOTCONN. */
 	if (!peer)
 		return 0;
 
-	peersock = peer->sk_socket;
-	/* XXX Why does this happen three times in kernel startup, all with
-	 * SOCK_SEQPACKET?  It appears that a legitimate message is sent, so we
-	 * need to figure out how to either get the peer inode or wait for the
-	 * peer to be fully initialized.  Something.
-	 */
-	/* TODO Using sk_security instead of ino will fix this! */
-	if (!peersock) {
-		printk(KERN_WARNING "Socket send before peer is inited\n");
-		return 0;
-	}
-
+	psec = peer->sk_security;
 	msg_initlen(&logmsg.msg, sizeof(logmsg));
-	logmsg.msg.type = PROVMSG_UNIXSEND;
+	logmsg.msg.type = PROVMSG_SOCKSEND;
 	logmsg.msg.cred_id = cursec->csid;
-
-	sbs = SOCK_INODE(peersock)->i_sb->s_security;
-	logmsg.inode.sb_uuid = sbs->uuid;
-	logmsg.inode.ino = SOCK_INODE(peersock)->i_ino;
+	logmsg.peer = psec->short_id;
 
 	write_to_relay(&logmsg, sizeof(logmsg));
 	return 0;
@@ -1174,14 +1160,14 @@ static void recv_unix_msg(struct socket *sock, struct msghdr *msg, int size,
 		int flags)
 {
 	const struct cred_security *cursec = current_security();
-	struct sb_security *sbs = SOCK_INODE(sock)->i_sb->s_security;
-	struct provmsg_unixrecv logmsg;
+	const struct sock_security *sks = sock->sk->sk_security;
+	struct provmsg_sockrecv logmsg;
 
 	msg_initlen(&logmsg.msg, sizeof(logmsg));
-	logmsg.msg.type = PROVMSG_UNIXRECV;
+	logmsg.msg.type = PROVMSG_SOCKRECV;
 	logmsg.msg.cred_id = cursec->csid;
-	logmsg.inode.sb_uuid = sbs->uuid;
-	logmsg.inode.ino = SOCK_INODE(sock)->i_ino;
+	logmsg.sock.host = boot_uuid;
+	logmsg.sock.sock = sks->short_id;
 
 	write_to_relay(&logmsg, sizeof(logmsg));
 }
@@ -1195,7 +1181,7 @@ static int send_tcp_msg(struct socket *sock, struct msghdr *msg, int size)
 	const struct sock_security *sks = sock->sk->sk_security;
 
 	printk(KERN_INFO "tcp send 0x%x -> %04hx:%08x\n", cursec->csid,
-			sks->remote_id.high, sks->remote_id.low);
+			sks->short_id.high, sks->short_id.low);
 	return 0;
 }
 
@@ -1209,7 +1195,7 @@ static void recv_tcp_msg(struct socket *sock, struct msghdr *msg, int size,
 	const struct sock_security *sks = sock->sk->sk_security;
 
 	printk(KERN_INFO "tcp recv 0x%x <- %04hx:%08x\n", cursec->csid,
-			sks->local_id.high, sks->local_id.low);
+			sks->full_id.sock.high, sks->full_id.sock.low);
 }
 
 
@@ -1282,16 +1268,16 @@ static int hifi_skbqueue_append_data(struct sock *sk, struct sk_buff *head)
 	if (sk->sk_prot != &udp_prot)
 		return 0;
 	if (!sks->set) {
-		next_sockid(&sks->id);
+		next_sockid(&sks->id.sock);
 		sks->set = 1;
 	}
 	printk(KERN_INFO "udp send 0x%x -> %04hx:%08x\n", csc->csid,
-			sks->id.high, sks->id.low);
+			sks->id.sock.high, sks->id.sock.low);
 	return 0;
 }
 
 /*
- * Receiving a UDP datagram
+ * Process receiving a UDP datagram
  */
 static int hifi_udp_postrcv_skb(struct sock *sk, struct sk_buff *skb)
 {
@@ -1301,7 +1287,7 @@ static int hifi_udp_postrcv_skb(struct sock *sk, struct sk_buff *skb)
 	if (!sks->set)
 		return 0;
 	printk(KERN_INFO "udp recv 0x%x <- %04hx:%08x\n", csc->csid,
-			sks->id.high, sks->id.low);
+			sks->id.sock.high, sks->id.sock.low);
 	return 0;
 }
 
@@ -1316,11 +1302,11 @@ static int hifi_socket_sock_rcv_skb(struct sock *sk, struct sk_buff *skb)
 	/* XXX Only TCP.  Need a better way to check this!! */
 	if (sk->sk_prot != &tcp_prot)
 		return 0;
-	if (sks->local_set || !sbs->set)
+	if (sks->full_set || !sbs->set)
 		return 0;
 
-	sks->local_id = sbs->id;
-	sks->local_set = 1;
+	sks->full_id = sbs->id;
+	sks->full_set = 1;
 	return 0;
 }
 
@@ -1349,8 +1335,8 @@ static void hifi_inet_conn_established(struct sock *sk, struct sk_buff *skb)
 {
 	struct sock_security *sec = sk->sk_security;
 
-	next_sockid(&sec->remote_id);
-	sec->remote_set = 1;
+	next_sockid(&sec->short_id);
+	sec->short_set = 1;
 	// skb->sk == NULL
 	// sk == parent socket
 }
@@ -1363,8 +1349,8 @@ static void hifi_inet_csk_clone(struct sock *newsk,
 {
 	struct sock_security *sec = newsk->sk_security;
 
-	next_sockid(&sec->remote_id);
-	sec->remote_set = 1;
+	next_sockid(&sec->short_id);
+	sec->short_set = 1;
 	// req == same from inet_conn_request
 }
 
@@ -1395,10 +1381,10 @@ static int tcp_in(struct sk_buff *skb)
 static int tcp_out(struct sk_buff *skb)
 {
 	struct sock_security *sec = skb->sk->sk_security;
-	if (!sec->remote_set)
+	if (!sec->short_set)
 		return 0;
 	//tcph = (struct tcphdr *) ((char *) iph + (iph->ihl << 2));
-	return label_packet(skb, &sec->remote_id);
+	return label_packet(skb, &sec->short_id);
 }
 
 
@@ -1414,7 +1400,7 @@ static int udp_in(struct sk_buff *skb)
 	sec->set = 1;
 	// skb->sk == NULL
 	printk(KERN_INFO "incoming udp, label=%04hx:%08x\n",
-			sec->id.high, sec->id.low);
+			sec->id.sock.high, sec->id.sock.low);
 	return 0;
 }
 
@@ -1428,8 +1414,8 @@ static int udp_out(struct sk_buff *skb)
 		return 0;
 
 	printk(KERN_INFO "outgoing udp, label=%04hx:%08x\n",
-			sec->id.high, sec->id.low);
-	return label_packet(skb, &sec->id);
+			sec->id.sock.high, sec->id.sock.low);
+	return label_packet(skb, &sec->id.sock);
 }
 
 
@@ -1590,10 +1576,17 @@ static int hifi_sk_alloc_security(struct sock *sk, int family, gfp_t priority)
 {
 	struct sock_security *sec;
 
-	sec = kzalloc(sizeof(*sec), priority);
+	sec = kmalloc(sizeof(*sec), priority);
 	if (!sec)
 		return -ENOMEM;
 
+	/*
+	 * For UNIX sockets, this will become the local ID.  For TCP sockets, it
+	 * will be the remote ID.  For UDP sockets, it will be unused.
+	 */
+	next_sockid(&sec->short_id);
+	sec->short_set = 1;
+	sec->full_set = 0;
 	sk->sk_security = sec;
 	return 0;
 }
@@ -1621,28 +1614,32 @@ static int hifi_skb_shinfo_alloc_security(struct sk_buff *skb, int recycling,
 {
 	struct skb_security *sec;
 
-	if (recycling) {
-		memset(skb_shinfo(skb)->security, 0, sizeof(*sec));
+	if (recycling)
 		return 0;
-	}
 
-	sec = kzalloc(sizeof(*sec), gfp);
+	sec = kmalloc(sizeof(*sec), gfp);
 	if (!sec)
 		return -ENOMEM;
 
+	sec->set = 0;
 	skb_shinfo(skb)->security = sec;
 	return 0;
 }
 
 static void hifi_skb_shinfo_free_security(struct sk_buff *skb, int recycling)
 {
-	if (recycling)
+	struct skb_security *sec = skb_shinfo(skb)->security;
+
+	if (!sec)
 		return;
 
-	if (skb_shinfo(skb)->security) {
-		kfree(skb_shinfo(skb)->security);
-		skb_shinfo(skb)->security = NULL;
+	if (recycling) {
+		sec->set = 0;
+		return;
 	}
+
+	kfree(sec);
+	skb_shinfo(skb)->security = NULL;
 }
 
 static int hifi_skb_shinfo_copy(struct sk_buff *skb,
