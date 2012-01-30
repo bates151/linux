@@ -136,7 +136,7 @@ static int relay_remove_file(struct dentry *dentry)
 static int relay_subbuf_start(struct rchan_buf *buf, void *subbuf,
 		void *prev_subbuf, size_t prev_padding)
 {
-	// Prevent loss of provenance data
+	/* Prevent loss of provenance data */
 	if (relay_buf_full(buf))
 		panic("Hi-Fi: no space left in relay!");
 	return 1;
@@ -306,7 +306,6 @@ static void next_sockid(struct sockid *label)
 	u64 counter = atomic64_inc_return(&sock_counter);
 	label->high = counter >> 32;
 	label->low = counter & ((1LL << 32) - 1);
-	// XXX copy host uuid here
 }
 
 /*
@@ -1194,6 +1193,9 @@ static void recv_tcp_msg(struct socket *sock, struct msghdr *msg, int size,
 	const struct cred_security *cursec = current_security();
 	const struct sock_security *sks = sock->sk->sk_security;
 
+	if (!sks->full_set)
+		return;
+
 	printk(KERN_INFO "tcp recv 0x%x <- %04hx:%08x\n", cursec->csid,
 			sks->full_id.sock.high, sks->full_id.sock.low);
 }
@@ -1335,23 +1337,8 @@ static void hifi_inet_conn_established(struct sock *sk, struct sk_buff *skb)
 {
 	struct sock_security *sec = sk->sk_security;
 
-	next_sockid(&sec->short_id);
-	sec->short_set = 1;
-	// skb->sk == NULL
-	// sk == parent socket
-}
-
-/*
- * Completing a connection at the server side of a TCP socket
- */
-static void hifi_inet_csk_clone(struct sock *newsk,
-		const struct request_sock *req)
-{
-	struct sock_security *sec = newsk->sk_security;
-
-	next_sockid(&sec->short_id);
-	sec->short_set = 1;
-	// req == same from inet_conn_request
+	/* Discard the ID we got from the listening socket */
+	sec->full_set = 0;
 }
 
 
@@ -1362,16 +1349,15 @@ static void hifi_inet_csk_clone(struct sock *newsk,
  ******************************************************************************/
 
 /*
- * TCP packet arrival
+ * TCP/UDP packet arrival
  */
-static int tcp_in(struct sk_buff *skb)
+static int tcp_udp_in(struct sk_buff *skb)
 {
 	struct skb_security *sec = skb_shinfo(skb)->security;
-
+	BUG_ON(!sec);
 	if (get_packet_label(skb, &sec->id))
 		return 0;
 	sec->set = 1;
-	// skb->sk == NULL
 	return 0;
 }
 
@@ -1385,23 +1371,6 @@ static int tcp_out(struct sk_buff *skb)
 		return 0;
 	//tcph = (struct tcphdr *) ((char *) iph + (iph->ihl << 2));
 	return label_packet(skb, &sec->short_id);
-}
-
-
-/*
- * UDP packet arrival
- */
-static int udp_in(struct sk_buff *skb)
-{
-	struct skb_security *sec = skb_shinfo(skb)->security;
-
-	if (get_packet_label(skb, &sec->id))
-		return 0;
-	sec->set = 1;
-	// skb->sk == NULL
-	printk(KERN_INFO "incoming udp, label=%04hx:%08x\n",
-			sec->id.sock.high, sec->id.sock.low);
-	return 0;
 }
 
 /*
@@ -1430,11 +1399,8 @@ static unsigned int hifi_ipv4_in(unsigned int hooknum, struct sk_buff *skb,
 
 	switch (iph->protocol) {
 	case IPPROTO_UDP:
-		if (udp_in(skb))
-			return NF_DROP;
-		break;
 	case IPPROTO_TCP:
-		if (tcp_in(skb))
+		if (tcp_udp_in(skb))
 			return NF_DROP;
 		break;
 	}
@@ -1599,12 +1565,6 @@ static void hifi_sk_free_security(struct sock *sk)
 	sk->sk_security = NULL;
 }
 
-static void hifi_sk_clone_security(const struct sock *sk, struct sock *newsk)
-{
-	// Is already allocated
-	// Called when a new child is cloned from a listening socket
-}
-
 
 /*
  * Socket buffer allocation hooks
@@ -1630,8 +1590,7 @@ static void hifi_skb_shinfo_free_security(struct sk_buff *skb, int recycling)
 {
 	struct skb_security *sec = skb_shinfo(skb)->security;
 
-	if (!sec)
-		return;
+	BUG_ON(!sec);
 
 	if (recycling) {
 		sec->set = 0;
@@ -1751,7 +1710,6 @@ static struct security_operations hifi_security_ops = {
 	HANDLE(socket_sock_rcv_skb),
 	HANDLE(unix_may_send),
 	HANDLE(inet_conn_established),
-	HANDLE(inet_csk_clone),
 
 	/* Allocation hooks */
 
@@ -1765,7 +1723,6 @@ static struct security_operations hifi_security_ops = {
 
 	HANDLE(sk_alloc_security),
 	HANDLE(sk_free_security),
-	HANDLE(sk_clone_security),
 	HANDLE(skb_shinfo_alloc_security),
 	HANDLE(skb_shinfo_free_security),
 	HANDLE(skb_shinfo_copy),
