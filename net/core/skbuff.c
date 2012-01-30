@@ -339,6 +339,7 @@ static void skb_release_data(struct sk_buff *skb)
 	if (!skb->cloned ||
 	    !atomic_sub_return(skb->nohdr ? (1 << SKB_DATAREF_SHIFT) + 1 : 1,
 			       &skb_shinfo(skb)->dataref)) {
+		security_skb_shinfo_free(skb, 0);
 		if (skb_shinfo(skb)->nr_frags) {
 			int i;
 			for (i = 0; i < skb_shinfo(skb)->nr_frags; i++)
@@ -429,7 +430,6 @@ static void skb_release_head_state(struct sk_buff *skb)
 /* Free everything but the sk_buff shell. */
 static void skb_release_all(struct sk_buff *skb)
 {
-	security_skb_shinfo_free(skb, 0);
 	skb_release_head_state(skb);
 	skb_release_data(skb);
 }
