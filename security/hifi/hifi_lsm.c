@@ -309,31 +309,47 @@ static void next_sockid(struct sockid *label)
 }
 
 /*
+ * Finds the label in a set of options.
+ */
+static u8 *find_packet_label(u8 *opts, int len)
+{
+	u8 *p = opts;
+	while (p < opts + len)
+		switch (p[0]) {
+		case IPOPT_HIFI:
+			/* Make sure it's the right length */
+			if (p[1] != sizeof(struct sockid_opt))
+				return NULL;
+			return p + 2;
+		case IPOPT_END:
+			return NULL;
+		case IPOPT_NOOP:
+			p++;
+			break;
+		default:
+			if (p[1] < 2)
+				return NULL;
+			p += p[1];
+			break;
+		}
+	return NULL;
+}
+
+/*
  * Reads the label off of the packet in skb.
  */
 static int get_packet_label(const struct sk_buff *skb,
 		struct host_sockid *label)
 {
 	struct iphdr *iph = ip_hdr(skb);
-	u8 *p, *end;
+	u8 *p;
 
-	p = (u8 *)(iph + 1);
-	end = p + ((iph->ihl - 5) << 2);
-	while (p < end)
-		switch (*p) {
-			case IPOPT_HIFI:
-				memcpy(label, p + 2, sizeof(*label));
-				return 0;
-			case IPOPT_END:
-				return -1;
-			case IPOPT_NOOP:
-				p++;
-				continue;
-			default:
-				p += *(p + 1);
-				continue;
-		}
-	return -1;
+	p = find_packet_label((u8 *) (iph + 1), (iph->ihl - 5) << 2);
+	if (!p)
+		return 0;
+
+	*label = *((struct host_sockid *) p);
+	return 0;
 }
 
 /*
@@ -341,62 +357,21 @@ static int get_packet_label(const struct sk_buff *skb,
  */
 static int label_packet(struct sk_buff *skb, const struct sockid *label)
 {
-	struct iphdr *iph;
-	struct ip_options *opt;
-	int len_delta, rv;
-	struct sockid_opt *ipopt;
+	struct iphdr *iph = ip_hdr(skb);
+	u8 *p;
 
-	/* Gotta fit in 320 bits */
-	BUILD_BUG_ON(sizeof(*ipopt) > MAX_IPOPTLEN);
-
-	/* Update in-core options structure */
-	opt = &IPCB(skb)->opt;
-	if (opt->optlen + sizeof(*ipopt) <= MAX_IPOPTLEN) {
-		/* Option will fit in the header */
-		len_delta = sizeof(*ipopt);
-		opt->optlen += sizeof(*ipopt);
-	} else {
-		/* Option won't fit - erase the others */
-		printk(KERN_WARNING "Hi-Fi: erasing packet options!\n");
-		len_delta = sizeof(*ipopt) - opt->optlen;
-		if (opt->optlen > 0)
-			memset(opt, 0, sizeof(*opt));
-		opt->optlen = sizeof(*ipopt);
+	p = find_packet_label((u8 *) (iph + 1), (iph->ihl - 5) << 2);
+	if (!p) {
+		printk(KERN_WARNING "Hi-Fi: no space found for packet label!\n");
+		print_hex_dump(KERN_INFO, "label: ", DUMP_PREFIX_OFFSET, 16, 1,
+				skb->data, skb->len, true);
+		return 0;
 	}
 
-	/* Update the packet itself */
-	rv = skb_cow(skb, skb_headroom(skb) + len_delta);
-	if (rv < 0)
-		return rv;
-	iph = ip_hdr(skb);
-	if (len_delta > 0) {
-		/* Expanding case */
-		skb_push(skb, len_delta);
-
-		memmove((char *)iph - len_delta, iph, sizeof(*iph));
-		skb_reset_network_header(skb);
-		iph = ip_hdr(skb);
-
-		iph->ihl = 5 + (opt->optlen >> 2);
-		iph->tot_len = htons(skb->len);
-	}
-
-	ipopt = (struct sockid_opt *)(iph + 1);
-	ipopt->num = IPOPT_HIFI;
-	ipopt->len = sizeof(*ipopt);
-	ipopt->label.host = boot_uuid;
-	ipopt->label.sock = *label;
-
-	if (len_delta < 0) {
-		/* Nopping case */
-		opt->optlen += -len_delta;
-		memset(ipopt + 1, IPOPT_NOP, -len_delta);
-	}
-
-	/* Um, yeah, stuff changed */
-	opt->is_changed = 1;
+	/* Write label and fix checksum */
+	((struct host_sockid *) p)->host = boot_uuid;
+	((struct host_sockid *) p)->sock = *label;
 	ip_send_check(iph);
-
 	return 0;
 }
 
@@ -1226,7 +1201,7 @@ static int hifi_socket_sendmsg(struct socket *sock, struct msghdr *msg,
 		return send_unix_connmode(sock, msg, size);
 	case AF_INET:
 		// XXX just TCP for now
-		if (sock->sk->sk_prot != &tcp_prot)
+		if (sock->sk->sk_protocol != IPPROTO_TCP)
 			break;
 		return send_tcp_msg(sock, msg, size);
 	}
@@ -1250,7 +1225,7 @@ static void hifi_socket_post_recvmsg(struct socket *sock, struct msghdr *msg,
 		recv_unix_msg(sock, msg, size, flags);
 		break;
 	case AF_INET:
-		if (sock->sk->sk_prot != &tcp_prot)
+		if (sock->sk->sk_protocol != IPPROTO_TCP)
 			return;
 		recv_tcp_msg(sock, msg, size, flags);
 		break;
@@ -1265,9 +1240,8 @@ static int hifi_skbqueue_append_data(struct sock *sk, struct sk_buff *head)
 	struct cred_security *csc = current_security();
 	struct skb_security *sks = skb_shinfo(head)->security;
 
-	/* XXX Better way to check this... */
 	/* Locking??? */
-	if (sk->sk_prot != &udp_prot)
+	if (sk->sk_family != AF_INET || sk->sk_protocol != IPPROTO_UDP)
 		return 0;
 	if (!sks->set) {
 		next_sockid(&sks->id.sock);
@@ -1301,8 +1275,8 @@ static int hifi_socket_sock_rcv_skb(struct sock *sk, struct sk_buff *skb)
 	struct sock_security *sks = sk->sk_security;
 	struct skb_security *sbs = skb_shinfo(skb)->security;
 
-	/* XXX Only TCP.  Need a better way to check this!! */
-	if (sk->sk_prot != &tcp_prot)
+	/* XXX Only TCP */
+	if (sk->sk_family != AF_INET || sk->sk_protocol != IPPROTO_TCP)
 		return 0;
 	if (sks->full_set || !sbs->set)
 		return 0;
@@ -1367,9 +1341,10 @@ static int tcp_udp_in(struct sk_buff *skb)
 static int tcp_out(struct sk_buff *skb)
 {
 	struct sock_security *sec = skb->sk->sk_security;
-	if (!sec->short_set)
+	if (!sec->short_set) {
+		printk(KERN_WARNING "Hi-Fi: short_id not set!\n");
 		return 0;
-	//tcph = (struct tcphdr *) ((char *) iph + (iph->ihl << 2));
+	}
 	return label_packet(skb, &sec->short_id);
 }
 
@@ -1379,11 +1354,10 @@ static int tcp_out(struct sk_buff *skb)
 static int udp_out(struct sk_buff *skb)
 {
 	struct skb_security *sec = skb_shinfo(skb)->security;
-	if (!sec->set)
+	if (!sec->set) {
+		printk(KERN_WARNING "Hi-Fi: skb id not set!\n");
 		return 0;
-
-	printk(KERN_INFO "outgoing udp, label=%04hx:%08x\n",
-			sec->id.sock.high, sec->id.sock.low);
+	}
 	return label_packet(skb, &sec->id.sock);
 }
 
@@ -1538,6 +1512,36 @@ static void hifi_msg_msg_free_security(struct msg_msg *msg) {
 /*
  * Socket allocation hooks
  */
+static int hifi_socket_post_create(struct socket *sock, int family, int type,
+		int protocol, int kern)
+{
+	struct inet_sock *inet;
+	struct ip_options_rcu *old, *opt;
+	struct sockid_opt *sopt;
+
+	/* Gotta fit in 320 bits */
+	BUILD_BUG_ON(sizeof(struct sockid_opt) > MAX_IPOPTLEN);
+
+	if (family != AF_INET)
+		return 0;
+
+	opt = kzalloc(sizeof(*opt) + sizeof(*sopt), GFP_KERNEL);
+	if (!opt)
+		return -ENOMEM;
+	opt->opt.__data[0] = IPOPT_HIFI;
+	opt->opt.__data[1] = sizeof(*sopt);
+	opt->opt.optlen = sizeof(*sopt);
+
+	inet = inet_sk(sock->sk);
+	old = rcu_dereference_protected(inet->inet_opt, 1);
+	rcu_assign_pointer(inet->inet_opt, opt);
+	if (old) {
+		printk(KERN_WARNING "Hi-Fi: inet_opt was already set??\n");
+		kfree_rcu(old, rcu);
+	}
+	return 0;
+}
+
 static int hifi_sk_alloc_security(struct sock *sk, int family, gfp_t priority)
 {
 	struct sock_security *sec;
@@ -1721,6 +1725,7 @@ static struct security_operations hifi_security_ops = {
 	HANDLE(msg_msg_alloc_security),
 	HANDLE(msg_msg_free_security),
 
+	HANDLE(socket_post_create),
 	HANDLE(sk_alloc_security),
 	HANDLE(sk_free_security),
 	HANDLE(skb_shinfo_alloc_security),
