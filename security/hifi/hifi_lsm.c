@@ -1542,6 +1542,34 @@ static int hifi_socket_post_create(struct socket *sock, int family, int type,
 	return 0;
 }
 
+/*
+ * Create the temporary request_sock from which the eventual accepted socket
+ * will be cloned.  We have the only reference to @req at this point, so we can
+ * play fast and loose with RCU.
+ */
+static int hifi_inet_conn_request(struct sock *sk, struct sk_buff *skb,
+		struct request_sock *req)
+{
+	struct inet_request_sock *irsk = inet_rsk(req);
+	struct ip_options_rcu *opt;
+
+	if (sk->sk_family != AF_INET)
+		return 0;
+
+	/* XXX Just blow away existing options for now */
+	if (irsk->opt)
+		kfree(irsk->opt);
+
+	opt = kzalloc(sizeof(*opt) + sizeof(struct sockid_opt), GFP_ATOMIC);
+	if (!opt)
+		return -ENOMEM;
+	opt->opt.__data[0] = IPOPT_HIFI;
+	opt->opt.__data[1] = sizeof(struct sockid_opt);
+	opt->opt.optlen = sizeof(struct sockid_opt);
+	irsk->opt = opt;
+	return 0;
+}
+
 static int hifi_sk_alloc_security(struct sock *sk, int family, gfp_t priority)
 {
 	struct sock_security *sec;
@@ -1726,6 +1754,7 @@ static struct security_operations hifi_security_ops = {
 	HANDLE(msg_msg_free_security),
 
 	HANDLE(socket_post_create),
+	HANDLE(inet_conn_request),
 	HANDLE(sk_alloc_security),
 	HANDLE(sk_free_security),
 	HANDLE(skb_shinfo_alloc_security),
