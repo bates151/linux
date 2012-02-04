@@ -363,8 +363,6 @@ static int label_packet(struct sk_buff *skb, const struct sockid *label)
 	p = find_packet_label((u8 *) (iph + 1), (iph->ihl - 5) << 2);
 	if (!p) {
 		printk(KERN_WARNING "Hi-Fi: no space found for packet label!\n");
-		print_hex_dump(KERN_INFO, "label: ", DUMP_PREFIX_OFFSET, 16, 1,
-				skb->data, skb->len, true);
 		return 0;
 	}
 
@@ -1154,7 +1152,8 @@ static int send_tcp_msg(struct socket *sock, struct msghdr *msg, int size)
 	const struct cred_security *cursec = current_security();
 	const struct sock_security *sks = sock->sk->sk_security;
 
-	printk(KERN_INFO "tcp send 0x%x -> %04hx:%08x\n", cursec->csid,
+	printk(KERN_INFO "tcp send %s[%x] -> %04hx:%08x\n",
+			current->comm, cursec->csid,
 			sks->short_id.high, sks->short_id.low);
 	return 0;
 }
@@ -1171,7 +1170,8 @@ static void recv_tcp_msg(struct socket *sock, struct msghdr *msg, int size,
 	if (!sks->full_set)
 		return;
 
-	printk(KERN_INFO "tcp recv 0x%x <- %04hx:%08x\n", cursec->csid,
+	printk(KERN_INFO "tcp recv %s[%x] <- %04hx:%08x\n",
+			current->comm, cursec->csid,
 			sks->full_id.sock.high, sks->full_id.sock.low);
 }
 
@@ -1247,7 +1247,8 @@ static int hifi_skbqueue_append_data(struct sock *sk, struct sk_buff *head)
 		next_sockid(&sks->id.sock);
 		sks->set = 1;
 	}
-	printk(KERN_INFO "udp send 0x%x -> %04hx:%08x\n", csc->csid,
+	printk(KERN_INFO "udp send %s[%x] -> %04hx:%08x\n",
+			current->comm, csc->csid,
 			sks->id.sock.high, sks->id.sock.low);
 	return 0;
 }
@@ -1262,7 +1263,8 @@ static int hifi_udp_postrcv_skb(struct sock *sk, struct sk_buff *skb)
 
 	if (!sks->set)
 		return 0;
-	printk(KERN_INFO "udp recv 0x%x <- %04hx:%08x\n", csc->csid,
+	printk(KERN_INFO "udp recv %s[%x] <- %04hx:%08x\n",
+			current->comm, csc->csid,
 			sks->id.sock.high, sks->id.sock.low);
 	return 0;
 }
