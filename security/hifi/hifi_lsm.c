@@ -1317,6 +1317,20 @@ static void hifi_inet_conn_established(struct sock *sk, struct sk_buff *skb)
 	sec->full_set = 0;
 }
 
+/*
+ * Prevent options from being overwritten
+ */
+static int hifi_socket_setsockopt(struct socket *sock, int level, int optname)
+{
+	if (sock->sk->sk_family == AF_INET && level == SOL_IP &&
+			optname == IP_OPTIONS) {
+		printk(KERN_WARNING "Hi-Fi: %s setting IP options via setsockopt\n",
+				current->comm);
+		return -EINVAL;
+	}
+	return 0;
+}
+
 
 /******************************************************************************
  *
@@ -1743,6 +1757,7 @@ static struct security_operations hifi_security_ops = {
 	HANDLE(socket_sock_rcv_skb),
 	HANDLE(unix_may_send),
 	HANDLE(inet_conn_established),
+	HANDLE(socket_setsockopt),
 
 	/* Allocation hooks */
 
