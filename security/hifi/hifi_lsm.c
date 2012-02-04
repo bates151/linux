@@ -1517,7 +1517,6 @@ static int hifi_socket_post_create(struct socket *sock, int family, int type,
 {
 	struct inet_sock *inet;
 	struct ip_options_rcu *old, *opt;
-	struct sockid_opt *sopt;
 
 	/* Gotta fit in 320 bits */
 	BUILD_BUG_ON(sizeof(struct sockid_opt) > MAX_IPOPTLEN);
@@ -1525,15 +1524,15 @@ static int hifi_socket_post_create(struct socket *sock, int family, int type,
 	if (family != AF_INET)
 		return 0;
 
-	opt = kzalloc(sizeof(*opt) + sizeof(*sopt), GFP_KERNEL);
+	opt = kzalloc(sizeof(*opt) + sizeof(struct sockid_opt), GFP_KERNEL);
 	if (!opt)
 		return -ENOMEM;
 	opt->opt.__data[0] = IPOPT_HIFI;
-	opt->opt.__data[1] = sizeof(*sopt);
-	opt->opt.optlen = sizeof(*sopt);
+	opt->opt.__data[1] = sizeof(struct sockid_opt);
+	opt->opt.optlen = sizeof(struct sockid_opt);
 
 	inet = inet_sk(sock->sk);
-	old = rcu_dereference_protected(inet->inet_opt, 1);
+	old = rcu_dereference(inet->inet_opt);
 	rcu_assign_pointer(inet->inet_opt, opt);
 	if (old) {
 		printk(KERN_WARNING "Hi-Fi: inet_opt was already set??\n");
