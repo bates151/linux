@@ -819,12 +819,7 @@ static inline void security_free_mnt_opts(struct security_mnt_opts *opts)
  *	Check permissions before connecting or sending datagrams from @sock to
  *	@other.
  *	@sock contains the socket structure.
- *	@other contains the peer socket structure.
- *	Return 0 if permission is granted.
- * @unix_stream_send:
- *	Check permissions before sending stream data from @sock to @other.
- *	@sock contains the socket structure.
- *	@other contains the peer sock (not socket) structure.
+ *	@sock contains the peer socket structure.
  *	Return 0 if permission is granted.
  *
  * The @unix_stream_connect and @unix_may_send hooks were necessary because
@@ -1642,7 +1637,6 @@ struct security_operations {
 #ifdef CONFIG_SECURITY_NETWORK
 	int (*unix_stream_connect) (struct sock *sock, struct sock *other, struct sock *newsk);
 	int (*unix_may_send) (struct socket *sock, struct socket *other);
-	int (*unix_stream_send) (struct socket *sock, struct sock *other);
 
 	int (*socket_create) (int family, int type, int protocol, int kern);
 	int (*socket_post_create) (struct socket *sock, int family,
@@ -2629,7 +2623,6 @@ static inline int security_inode_getsecctx(struct inode *inode, void **ctx, u32 
 
 int security_unix_stream_connect(struct sock *sock, struct sock *other, struct sock *newsk);
 int security_unix_may_send(struct socket *sock,  struct socket *other);
-int security_unix_stream_send(struct socket *sock,  struct sock *other);
 int security_socket_create(int family, int type, int protocol, int kern);
 int security_socket_post_create(struct socket *sock, int family,
 				int type, int protocol, int kern);
@@ -2687,12 +2680,6 @@ static inline int security_unix_stream_connect(struct sock *sock,
 
 static inline int security_unix_may_send(struct socket *sock,
 					 struct socket *other)
-{
-	return 0;
-}
-
-static inline int security_unix_stream_send(struct socket *sock,
-					    struct sock *other)
 {
 	return 0;
 }
