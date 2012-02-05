@@ -337,19 +337,25 @@ static u8 *find_packet_label(u8 *opts, int len)
 }
 
 /*
- * Reads the label off of the packet in skb.
+ * Removes the label from the packet in @skb and returns it in @label.
  */
-static int get_packet_label(const struct sk_buff *skb,
-		struct host_sockid *label)
+static int detach_packet_label(struct sk_buff *skb, struct host_sockid *label)
 {
 	struct iphdr *iph = ip_hdr(skb);
-	u8 *p;
-
-	p = find_packet_label((u8 *) (iph + 1), (iph->ihl - 5) << 2);
+	u8 *p = find_packet_label((u8 *) (iph + 1), (iph->ihl - 5) * 4);
 	if (!p)
-		return 0;
+		return -1;
 
 	*label = *((struct host_sockid *) (p + 2));
+
+	memmove(skb_pull(skb, sizeof(struct sockid_opt)), iph, p - (u8 *) iph);
+	skb_reset_network_header(skb);
+
+	/* Do a little fixup... */
+	iph = ip_hdr(skb);
+	iph->tot_len -= sizeof(struct sockid_opt);
+	iph->ihl -= sizeof(struct sockid_opt) / 4;
+	ip_send_check(iph);
 	return 0;
 }
 
@@ -1350,7 +1356,7 @@ static int tcp_udp_in(struct sk_buff *skb)
 {
 	struct skb_security *sec = skb_shinfo(skb)->security;
 	BUG_ON(!sec);
-	if (get_packet_label(skb, &sec->id))
+	if (detach_packet_label(skb, &sec->id))
 		return 0;
 	sec->set = 1;
 	return 0;
