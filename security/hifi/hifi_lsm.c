@@ -1138,10 +1138,14 @@ static int send_tcp_msg(struct socket *sock)
 {
 	const struct cred_security *cursec = current_security();
 	const struct sock_security *sks = sock->sk->sk_security;
+	struct provmsg_socksend msg;
 
-	printk(KERN_INFO "tcp send %s[%x] -> %04hx:%08x\n",
-			current->comm, cursec->csid,
-			sks->short_id.high, sks->short_id.low);
+	msg_initlen(&msg.msg, sizeof(msg));
+	msg.msg.type = PROVMSG_SOCKSEND;
+	msg.msg.cred_id = cursec->csid;
+	msg.peer = sks->short_id;
+
+	write_to_relay(&msg, sizeof(msg));
 	return 0;
 }
 
@@ -1152,13 +1156,61 @@ static void recv_tcp_msg(struct socket *sock)
 {
 	const struct cred_security *cursec = current_security();
 	const struct sock_security *sks = sock->sk->sk_security;
+	struct provmsg_sockrecv msg;
 
 	if (!sks->full_set)
 		return;
 
-	printk(KERN_INFO "tcp recv %s[%x] <- %04hx:%08x\n",
-			current->comm, cursec->csid,
-			sks->full_id.sock.high, sks->full_id.sock.low);
+	msg_initlen(&msg.msg, sizeof(msg));
+	msg.msg.type = PROVMSG_SOCKRECV;
+	msg.msg.cred_id = cursec->csid;
+	msg.sock = sks->full_id;
+
+	write_to_relay(&msg, sizeof(msg));
+}
+
+/*
+ * Sending on a UDP socket
+ */
+static int send_udp_msg(struct sk_buff *skb)
+{
+	const struct cred_security *cursec = current_security();
+	struct skb_security *sks = skb_shinfo(skb)->security;
+	struct provmsg_socksend msg;
+
+	if (!sks->set) {
+		next_sockid(&sks->id.sock);
+		sks->set = 1;
+	}
+
+	msg_initlen(&msg.msg, sizeof(msg));
+	msg.msg.type = PROVMSG_SOCKSEND;
+	msg.msg.cred_id = cursec->csid;
+	msg.peer = sks->id.sock;
+
+	write_to_relay(&msg, sizeof(msg));
+	return 0;
+}
+
+/*
+ * Receiving on a UDP socket
+ */
+static int recv_udp_msg(struct sk_buff *skb)
+{
+	const struct cred_security *cursec = current_security();
+	struct skb_security *sks = skb_shinfo(skb)->security;
+	struct provmsg_sockrecv msg;
+
+	if (!sks->set)
+		return 0;
+
+	msg_initlen(&msg.msg, sizeof(msg));
+	msg.msg.type = PROVMSG_SOCKRECV;
+	msg.msg.cred_id = cursec->csid;
+	msg.sock = sks->id;
+
+	write_to_relay(&msg, sizeof(msg));
+	return 0;
 }
 
 
@@ -1191,8 +1243,8 @@ static int hifi_socket_sendmsg(struct socket *sock, struct msghdr *msg,
 
 	switch (sock->sk->sk_family) {
 	case AF_UNIX:
-		/* Datagram sockets handled by unix_may_send */
-		if (sock->sk->sk_type == SOCK_DGRAM)
+		/* Non-stream sockets are better handled by unix_may_send */
+		if (sock->sk->sk_type != SOCK_STREAM)
 			break;
 		peer = unix_sk(sock->sk)->peer;
 		/* Not connected.  Send will fail with ENOTCONN. */
@@ -1200,7 +1252,7 @@ static int hifi_socket_sendmsg(struct socket *sock, struct msghdr *msg,
 			break;
 		return send_unix_msg(peer);
 	case AF_INET:
-		// XXX just TCP for now
+		/* XXX just TCP for now, UDP handled by append_data */
 		if (sock->sk->sk_protocol != IPPROTO_TCP)
 			break;
 		return send_tcp_msg(sock);
@@ -1213,20 +1265,15 @@ static int hifi_socket_sendmsg(struct socket *sock, struct msghdr *msg,
  */
 static int hifi_skbqueue_append_data(struct sock *sk, struct sk_buff *head)
 {
-	struct cred_security *csc = current_security();
-	struct skb_security *sks = skb_shinfo(head)->security;
+	const struct cred_security *cursec = current_security();
 
-	/* Locking??? */
+	if (cursec->flags & CSEC_OPAQUE)
+		return 0;
+
+	/* XXX Just UDP, def. not stream sockets */
 	if (sk->sk_family != AF_INET || sk->sk_protocol != IPPROTO_UDP)
 		return 0;
-	if (!sks->set) {
-		next_sockid(&sks->id.sock);
-		sks->set = 1;
-	}
-	printk(KERN_INFO "udp send %s[%x] -> %04hx:%08x\n",
-			current->comm, csc->csid,
-			sks->id.sock.high, sks->id.sock.low);
-	return 0;
+	return send_udp_msg(head);
 }
 
 /*
@@ -1258,15 +1305,12 @@ static void hifi_socket_post_recvmsg(struct socket *sock, struct msghdr *msg,
  */
 static int hifi_udp_postrcv_skb(struct sock *sk, struct sk_buff *skb)
 {
-	struct cred_security *csc = current_security();
-	struct skb_security *sks = skb_shinfo(skb)->security;
+	const struct cred_security *cursec = current_security();
 
-	if (!sks->set)
+	if (cursec->flags & CSEC_OPAQUE)
 		return 0;
-	printk(KERN_INFO "udp recv %s[%x] <- %04hx:%08x\n",
-			current->comm, csc->csid,
-			sks->id.sock.high, sks->id.sock.low);
-	return 0;
+
+	return recv_udp_msg(skb);
 }
 
 /*
@@ -1298,11 +1342,9 @@ static int hifi_unix_may_send(struct socket *sock, struct socket *other)
 	if (cursec->flags & CSEC_OPAQUE)
 		return 0;
 
-	switch (sock->sk->sk_type) {
-	case SOCK_DGRAM:
-		return send_unix_msg(other->sk);
-	}
-	return 0;
+	/* This should only be called by DGRAM/SEQPACKET sockets */
+	BUG_ON(sock->sk->sk_type == SOCK_STREAM);
+	return send_unix_msg(other->sk);
 }
 
 /*
