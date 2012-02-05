@@ -1090,70 +1090,45 @@ static int hifi_msg_queue_msgrcv(struct msg_queue *msq, struct msg_msg *msg,
  ******************************************************************************/
 
 /*
- * Sending on a datagram UNIX domain socket
+ * Sending on a UNIX domain socket
  */
-static int send_unix_dgram(struct socket *sock, struct socket *other)
+static int send_unix_msg(struct sock *peersk)
 {
 	const struct cred_security *cursec = current_security();
-	const struct sock_security *osec = other->sk->sk_security;
+	const struct sock_security *psec = peersk->sk_security;
 	struct provmsg_socksend msg;
 
 	msg_initlen(&msg.msg, sizeof(msg));
 	msg.msg.type = PROVMSG_SOCKSEND;
 	msg.msg.cred_id = cursec->csid;
-	msg.peer = osec->short_id;
+	msg.peer = psec->short_id;
 
 	write_to_relay(&msg, sizeof(msg));
 	return 0;
 }
 
 /*
- * Sending on a connection-mode UNIX domain socket
- */
-static int send_unix_connmode(struct socket *sock, struct msghdr *msg, int size)
-{
-	const struct cred_security *cursec = current_security();
-	const struct sock *peer = unix_sk(sock->sk)->peer;
-	const struct sock_security *psec;
-	struct provmsg_socksend logmsg;
-
-	/* Socket is not connected.  Will return with ENOTCONN. */
-	if (!peer)
-		return 0;
-
-	psec = peer->sk_security;
-	msg_initlen(&logmsg.msg, sizeof(logmsg));
-	logmsg.msg.type = PROVMSG_SOCKSEND;
-	logmsg.msg.cred_id = cursec->csid;
-	logmsg.peer = psec->short_id;
-
-	write_to_relay(&logmsg, sizeof(logmsg));
-	return 0;
-}
-
-/*
  * Receiving on a UNIX domain socket (any kind)
  */
-static void recv_unix_msg(struct socket *sock, struct msghdr *msg, int size,
-		int flags)
+static void recv_unix_msg(struct sock *sk)
 {
 	const struct cred_security *cursec = current_security();
-	const struct sock_security *sks = sock->sk->sk_security;
-	struct provmsg_sockrecv logmsg;
+	const struct sock_security *sks = sk->sk_security;
+	struct provmsg_sockrecv msg;
 
-	msg_initlen(&logmsg.msg, sizeof(logmsg));
-	logmsg.msg.type = PROVMSG_SOCKRECV;
-	logmsg.msg.cred_id = cursec->csid;
-	logmsg.sock.host = boot_uuid;
-	logmsg.sock.sock = sks->short_id;
+	msg_initlen(&msg.msg, sizeof(msg));
+	msg.msg.type = PROVMSG_SOCKRECV;
+	msg.msg.cred_id = cursec->csid;
+	msg.sock.host = boot_uuid;
+	msg.sock.sock = sks->short_id;
 
-	write_to_relay(&logmsg, sizeof(logmsg));
+	write_to_relay(&msg, sizeof(msg));
 }
 
 /*
  * Sending on a TCP socket
  */
-static int send_tcp_msg(struct socket *sock, struct msghdr *msg, int size)
+static int send_tcp_msg(struct socket *sock)
 {
 	const struct cred_security *cursec = current_security();
 	const struct sock_security *sks = sock->sk->sk_security;
@@ -1167,8 +1142,7 @@ static int send_tcp_msg(struct socket *sock, struct msghdr *msg, int size)
 /*
  * Receiving on a TCP socket
  */
-static void recv_tcp_msg(struct socket *sock, struct msghdr *msg, int size,
-		int flags)
+static void recv_tcp_msg(struct socket *sock)
 {
 	const struct cred_security *cursec = current_security();
 	const struct sock_security *sks = sock->sk->sk_security;
@@ -1195,47 +1169,28 @@ static int hifi_socket_sendmsg(struct socket *sock, struct msghdr *msg,
 		int size)
 {
 	const struct cred_security *cursec = current_security();
+	struct sock *peer;
 
 	if (cursec->flags & CSEC_OPAQUE)
 		return 0;
 
 	switch (sock->sk->sk_family) {
 	case AF_UNIX:
-		/* XXX Just connection-mode sockets for now */
+		/* Datagram sockets handled by unix_may_send */
 		if (sock->sk->sk_type == SOCK_DGRAM)
 			break;
-		return send_unix_connmode(sock, msg, size);
+		peer = unix_sk(sock->sk)->peer;
+		/* Not connected.  Send will fail with ENOTCONN. */
+		if (!peer)
+			break;
+		return send_unix_msg(peer);
 	case AF_INET:
 		// XXX just TCP for now
 		if (sock->sk->sk_protocol != IPPROTO_TCP)
 			break;
-		return send_tcp_msg(sock, msg, size);
+		return send_tcp_msg(sock);
 	}
 	return 0;
-}
-
-/*
- * Receiving on a socket
- */
-static void hifi_socket_post_recvmsg(struct socket *sock, struct msghdr *msg,
-		int size, int flags)
-{
-	const struct cred_security *cursec = current_security();
-
-	if (cursec->flags & CSEC_OPAQUE)
-		return;
-
-	// XXX more later?
-	switch (sock->sk->sk_family) {
-	case AF_UNIX:
-		recv_unix_msg(sock, msg, size, flags);
-		break;
-	case AF_INET:
-		if (sock->sk->sk_protocol != IPPROTO_TCP)
-			return;
-		recv_tcp_msg(sock, msg, size, flags);
-		break;
-	}
 }
 
 /*
@@ -1260,7 +1215,31 @@ static int hifi_skbqueue_append_data(struct sock *sk, struct sk_buff *head)
 }
 
 /*
- * Process receiving a UDP datagram
+ * Receiving on a socket
+ */
+static void hifi_socket_post_recvmsg(struct socket *sock, struct msghdr *msg,
+		int size, int flags)
+{
+	const struct cred_security *cursec = current_security();
+
+	if (cursec->flags & CSEC_OPAQUE)
+		return;
+
+	// XXX more later?
+	switch (sock->sk->sk_family) {
+	case AF_UNIX:
+		recv_unix_msg(sock->sk);
+		break;
+	case AF_INET:
+		if (sock->sk->sk_protocol != IPPROTO_TCP)
+			return;
+		recv_tcp_msg(sock);
+		break;
+	}
+}
+
+/*
+ * Receiving a UDP datagram
  */
 static int hifi_udp_postrcv_skb(struct sock *sk, struct sk_buff *skb)
 {
@@ -1295,7 +1274,7 @@ static int hifi_socket_sock_rcv_skb(struct sock *sk, struct sk_buff *skb)
 }
 
 /*
- * Sending on a UNIX domain socket
+ * Sending datagrams on a UNIX domain socket (closer hook than sendmsg)
  */
 static int hifi_unix_may_send(struct socket *sock, struct socket *other)
 {
@@ -1306,8 +1285,7 @@ static int hifi_unix_may_send(struct socket *sock, struct socket *other)
 
 	switch (sock->sk->sk_type) {
 	case SOCK_DGRAM:
-		return send_unix_dgram(sock, other);
-		break;
+		return send_unix_msg(other->sk);
 	}
 	return 0;
 }
