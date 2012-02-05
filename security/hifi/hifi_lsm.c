@@ -362,8 +362,11 @@ static int label_packet(struct sk_buff *skb, const struct sockid *label)
 	struct host_sockid *lp;
 	u8 *p;
 
-	p = find_packet_label((u8 *) (iph + 1), (iph->ihl - 5) << 2);
+	p = find_packet_label((u8 *) (iph + 1), (iph->ihl - 5) * 4);
 	if (!p) {
+		/* No data, don't worry about it */
+		if (skb->data_len == 0)
+			return 0;
 		printk(KERN_WARNING "Hi-Fi: no space found for packet label!\n");
 		return 0;
 	}
