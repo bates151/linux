@@ -1108,6 +1108,10 @@ static int do_ip_getsockopt(struct sock *sk, int level, int optname,
 
 		ip_options_undo(opt);
 
+		val = security_sock_get_ipopts(sk, opt);
+		if (val)
+			return val;
+
 		len = min_t(unsigned int, len, opt->optlen);
 		if (put_user(len, optlen))
 			return -EFAULT;

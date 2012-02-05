@@ -629,6 +629,11 @@ static int cap_socket_setsockopt(struct socket *sock, int level, int optname)
 	return 0;
 }
 
+static int cap_sock_get_ipopts(struct sock *sk, struct ip_options *opt)
+{
+	return 0;
+}
+
 static int cap_socket_getsockopt(struct socket *sock, int level, int optname)
 {
 	return 0;
@@ -1062,6 +1067,7 @@ void __init security_fixup_ops(struct security_operations *ops)
 	set_to_cap_if_null(ops, socket_getpeername);
 	set_to_cap_if_null(ops, socket_setsockopt);
 	set_to_cap_if_null(ops, socket_getsockopt);
+	set_to_cap_if_null(ops, sock_get_ipopts);
 	set_to_cap_if_null(ops, socket_shutdown);
 	set_to_cap_if_null(ops, socket_sock_rcv_skb);
 	set_to_cap_if_null(ops, skb_shinfo_alloc_security);
