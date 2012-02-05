@@ -318,9 +318,10 @@ static u8 *find_packet_label(u8 *opts, int len)
 		switch (p[0]) {
 		case IPOPT_HIFI:
 			/* Make sure it's the right length */
-			if (p[1] != sizeof(struct sockid_opt))
+			if (p + sizeof(struct sockid_opt) > opts + len ||
+					p[1] != sizeof(struct sockid_opt))
 				return NULL;
-			return p + 2;
+			return p;
 		case IPOPT_END:
 			return NULL;
 		case IPOPT_NOOP:
@@ -348,7 +349,7 @@ static int get_packet_label(const struct sk_buff *skb,
 	if (!p)
 		return 0;
 
-	*label = *((struct host_sockid *) p);
+	*label = *((struct host_sockid *) (p + 2));
 	return 0;
 }
 
@@ -358,6 +359,7 @@ static int get_packet_label(const struct sk_buff *skb,
 static int label_packet(struct sk_buff *skb, const struct sockid *label)
 {
 	struct iphdr *iph = ip_hdr(skb);
+	struct host_sockid *lp;
 	u8 *p;
 
 	p = find_packet_label((u8 *) (iph + 1), (iph->ihl - 5) << 2);
@@ -367,8 +369,9 @@ static int label_packet(struct sk_buff *skb, const struct sockid *label)
 	}
 
 	/* Write label and fix checksum */
-	((struct host_sockid *) p)->host = boot_uuid;
-	((struct host_sockid *) p)->sock = *label;
+	lp = (struct host_sockid *) (p + 2);
+	lp->host = boot_uuid;
+	lp->sock = *label;
 	ip_send_check(iph);
 	return 0;
 }
@@ -1326,8 +1329,29 @@ static int hifi_socket_setsockopt(struct socket *sock, int level, int optname)
 			optname == IP_OPTIONS) {
 		printk(KERN_WARNING "Hi-Fi: %s setting IP options via setsockopt\n",
 				current->comm);
-		return -EINVAL;
+		return -EACCES;
 	}
+	return 0;
+}
+
+/*
+ * Hide options from paranoid processes
+ */
+static int hifi_sock_get_ipopts(struct sock *sk, struct ip_options *opt)
+{
+	int len;
+	u8 *p = find_packet_label(opt->__data, opt->optlen);
+	if (!p)
+		return 0;
+
+	/*
+	 * Slide anything after our options back.  No need to update the options
+	 * structure because it's just thrown away.
+	 */
+	opt->optlen -= sizeof(struct sockid_opt);
+	len = opt->optlen - (p - opt->__data);
+	if (len > 0)
+		memmove(p, p + sizeof(struct sockid_opt), len);
 	return 0;
 }
 
@@ -1758,6 +1782,7 @@ static struct security_operations hifi_security_ops = {
 	HANDLE(unix_may_send),
 	HANDLE(inet_conn_established),
 	HANDLE(socket_setsockopt),
+	HANDLE(sock_get_ipopts),
 
 	/* Allocation hooks */
 
