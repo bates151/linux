@@ -1175,10 +1175,19 @@ static int hifi_socket_sendmsg(struct socket *sock, struct msghdr *msg,
 		int size)
 {
 	const struct cred_security *cursec = current_security();
+	struct cmsghdr *cmsg;
 	struct sock *peer;
 
 	if (cursec->flags & CSEC_OPAQUE)
 		return 0;
+
+	for (cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg))
+		if (cmsg->cmsg_level == SOL_IP &&
+				cmsg->cmsg_type == IP_RETOPTS) {
+			printk(KERN_WARNING "Hi-Fi: %s send with IP_RETOPTS\n",
+					current->comm);
+			return -EACCES;
+		}
 
 	switch (sock->sk->sk_family) {
 	case AF_UNIX:
