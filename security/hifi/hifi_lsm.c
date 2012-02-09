@@ -1359,7 +1359,7 @@ static void hifi_inet_conn_established(struct sock *sk, struct sk_buff *skb)
 }
 
 /*
- * Prevent options from being overwritten
+ * Feign ignorance to prevent options from being overwritten
  */
 static int hifi_socket_setsockopt(struct socket *sock, int level, int optname)
 {
@@ -1367,29 +1367,19 @@ static int hifi_socket_setsockopt(struct socket *sock, int level, int optname)
 			optname == IP_OPTIONS) {
 		printk(KERN_WARNING "Hi-Fi: %s setting IP options via setsockopt\n",
 				current->comm);
-		return -EACCES;
+		return -ENOPROTOOPT;
 	}
 	return 0;
 }
 
 /*
- * Hide options from paranoid processes
+ * Feign ignorance to make OpenSSH work again
  */
-static int hifi_sock_get_ipopts(struct sock *sk, struct ip_options *opt)
+static int hifi_socket_getsockopt(struct socket *sock, int level, int optname)
 {
-	int len;
-	u8 *p = find_packet_label(opt->__data, opt->optlen);
-	if (!p)
-		return 0;
-
-	/*
-	 * Slide anything after our options back.  No need to update the options
-	 * structure because it's just thrown away.
-	 */
-	opt->optlen -= sizeof(struct sockid_opt);
-	len = opt->optlen - (p - opt->__data);
-	if (len > 0)
-		memmove(p, p + sizeof(struct sockid_opt), len);
+	if (sock->sk->sk_family == AF_INET && level == SOL_IP &&
+			optname == IP_OPTIONS)
+		return -ENOPROTOOPT;
 	return 0;
 }
 
@@ -1820,7 +1810,7 @@ static struct security_operations hifi_security_ops = {
 	HANDLE(unix_may_send),
 	HANDLE(inet_conn_established),
 	HANDLE(socket_setsockopt),
-	HANDLE(sock_get_ipopts),
+	HANDLE(socket_getsockopt),
 
 	/* Allocation hooks */
 
