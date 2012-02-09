@@ -1120,11 +1120,6 @@ int security_socket_setsockopt(struct socket *sock, int level, int optname)
 	return security_ops->socket_setsockopt(sock, level, optname);
 }
 
-int security_sock_get_ipopts(struct sock *sk, struct ip_options *opt)
-{
-	return security_ops->sock_get_ipopts(sk, opt);
-}
-
 int security_socket_shutdown(struct socket *sock, int how)
 {
 	return security_ops->socket_shutdown(sock, how);

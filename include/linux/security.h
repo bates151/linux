@@ -50,7 +50,6 @@
 struct ctl_table;
 struct audit_krule;
 struct user_namespace;
-struct ip_options;
 
 /*
  * These functions are in security/capability.c and are used
@@ -926,12 +925,6 @@ static inline void security_free_mnt_opts(struct security_mnt_opts *opts)
  *	@level contains the protocol level to set options for.
  *	@optname contains the name of the option to set.
  *	Return 0 if permission is granted.
- * @sock_get_ipopts:
- *	Check permissions before returning options from the IP header, or modify
- *	what options data is returned.
- *	@sk contains the sock (not socket) structure
- *	@opt contains the IP options structure, with 40 bytes of space for data
- *	Return 0 if permission is granted.
  * @socket_shutdown:
  *	Checks permission before all or part of a connection on the socket
  *	@sock is shut down.
@@ -1657,7 +1650,6 @@ struct security_operations {
 	int (*socket_getpeername) (struct socket *sock);
 	int (*socket_getsockopt) (struct socket *sock, int level, int optname);
 	int (*socket_setsockopt) (struct socket *sock, int level, int optname);
-	int (*sock_get_ipopts) (struct sock *sk, struct ip_options *opt);
 	int (*socket_shutdown) (struct socket *sock, int how);
 	int (*socket_sock_rcv_skb) (struct sock *sk, struct sk_buff *skb);
 	int (*skb_shinfo_alloc_security) (struct sk_buff *skb, int recycling,
@@ -2639,7 +2631,6 @@ int security_socket_getsockname(struct socket *sock);
 int security_socket_getpeername(struct socket *sock);
 int security_socket_getsockopt(struct socket *sock, int level, int optname);
 int security_socket_setsockopt(struct socket *sock, int level, int optname);
-int security_sock_get_ipopts(struct sock *sk, struct ip_options *opt);
 int security_socket_shutdown(struct socket *sock, int how);
 int security_sock_rcv_skb(struct sock *sk, struct sk_buff *skb);
 int security_skb_shinfo_alloc(struct sk_buff *skb, int recycling, gfp_t gfp);
@@ -2760,12 +2751,6 @@ static inline int security_socket_getsockopt(struct socket *sock,
 
 static inline int security_socket_setsockopt(struct socket *sock,
 					     int level, int optname)
-{
-	return 0;
-}
-
-static inline int security_sock_get_ipopts(struct sock *sk,
-		struct ip_options *opt)
 {
 	return 0;
 }
