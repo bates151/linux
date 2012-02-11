@@ -965,7 +965,7 @@ static inline void security_free_mnt_opts(struct security_mnt_opts *opts)
  *	@skb contains the original socket buffer structure.
  *	@shinfo contains the new shared info structure.
  *	@gfp indicates the atomicity of any memory allocations.
- * @skbqueue_append_data:
+ * @socket_dgram_append:
  *	Check permissions before allowing a process to append data to the end of
  *	a potentially corked packet.  This is the point where a process can be
  *	associated with the packet which will eventually be sent.  This is
@@ -975,12 +975,11 @@ static inline void security_free_mnt_opts(struct security_mnt_opts *opts)
  *	@head contains the first socket buffer in the queue, from which the
  *	combined buffer will be built.
  *	Return 0 if permission is granted.
- * @udp_postrcv_skb:
- *	Check permissions before delivering a UDP datagram to a process.
+ * @socket_dgram_post_recv:
+ *	Notifies the security module before delivering a datagram to a process.
  *	@sk contains the sock (not socket) on which the packet is being
  *	received.
  *	@skb contains the datagram.
- *	Return 0 if permission is granted.
  * @socket_getpeersec_stream:
  *	This hook allows the security module to provide peer socket security
  *	state for unix or connected tcp sockets to userspace via getsockopt
@@ -1657,8 +1656,8 @@ struct security_operations {
 	void (*skb_shinfo_free_security) (struct sk_buff *skb, int recycling);
 	int (*skb_shinfo_copy) (struct sk_buff *skb,
 			struct skb_shared_info *shinfo, gfp_t gfp);
-	int (*skbqueue_append_data) (struct sock *sk, struct sk_buff *head);
-	int (*udp_postrcv_skb) (struct sock *sk, struct sk_buff *skb);
+	int (*socket_dgram_append) (struct sock *sk, struct sk_buff *head);
+	void (*socket_dgram_post_recv) (struct sock *sk, struct sk_buff *skb);
 	int (*socket_getpeersec_stream) (struct socket *sock, char __user *optval, int __user *optlen, unsigned len);
 	int (*socket_getpeersec_dgram) (struct socket *sock, struct sk_buff *skb, u32 *secid);
 	int (*sk_alloc_security) (struct sock *sk, int family, gfp_t priority);
@@ -2637,8 +2636,8 @@ int security_skb_shinfo_alloc(struct sk_buff *skb, int recycling, gfp_t gfp);
 void security_skb_shinfo_free(struct sk_buff *skb, int recycling);
 int security_skb_shinfo_copy(struct sk_buff *skb, struct skb_shared_info *shinfo,
 		gfp_t gfp);
-int security_skbqueue_append_data(struct sock *sk, struct sk_buff *head);
-int security_udp_postrcv_skb(struct sock *sk, struct sk_buff *skb);
+int security_socket_dgram_append(struct sock *sk, struct sk_buff *head);
+void security_socket_dgram_post_recv(struct sock *sk, struct sk_buff *skb);
 int security_socket_getpeersec_stream(struct socket *sock, char __user *optval,
 				      int __user *optlen, unsigned len);
 int security_socket_getpeersec_dgram(struct socket *sock, struct sk_buff *skb, u32 *secid);
@@ -2781,15 +2780,15 @@ static inline int security_skb_shinfo_copy(struct sk_buff *skb,
 	return 0;
 }
 
-static inline int security_skbqueue_append_data(struct sock *sk,
+static inline int security_socket_dgram_append(struct sock *sk,
 		struct sk_buff *head)
 {
 	return 0;
 }
 
-static inline int security_udp_postrcv_skb(struct sock *sk, struct sk_buff *skb)
+static inline void security_socket_dgram_post_recv(struct sock *sk,
+		struct sk_buff *skb)
 {
-	return 0;
 }
 
 static inline int security_socket_getpeersec_stream(struct socket *sock, char __user *optval,

@@ -1263,7 +1263,7 @@ static int hifi_socket_sendmsg(struct socket *sock, struct msghdr *msg,
 /*
  * Appending data to an outgoing datagram
  */
-static int hifi_skbqueue_append_data(struct sock *sk, struct sk_buff *head)
+static int hifi_socket_dgram_append(struct sock *sk, struct sk_buff *head)
 {
 	const struct cred_security *cursec = current_security();
 
@@ -1303,14 +1303,17 @@ static void hifi_socket_post_recvmsg(struct socket *sock, struct msghdr *msg,
 /*
  * Receiving a UDP datagram
  */
-static int hifi_udp_postrcv_skb(struct sock *sk, struct sk_buff *skb)
+static void hifi_socket_dgram_post_recv(struct sock *sk, struct sk_buff *skb)
 {
 	const struct cred_security *cursec = current_security();
 
 	if (cursec->flags & CSEC_OPAQUE)
-		return 0;
+		return;
+	/* XXX Just UDP for now; other protos might need hook placements */
+	if (sk->sk_family != AF_INET || sk->sk_protocol != IPPROTO_UDP)
+		return;
 
-	return recv_udp_msg(skb);
+	recv_udp_msg(skb);
 }
 
 /*
@@ -1804,8 +1807,8 @@ static struct security_operations hifi_security_ops = {
 
 	HANDLE(socket_sendmsg),
 	HANDLE(socket_post_recvmsg),
-	HANDLE(skbqueue_append_data),
-	HANDLE(udp_postrcv_skb),
+	HANDLE(socket_dgram_append),
+	HANDLE(socket_dgram_post_recv),
 	HANDLE(socket_sock_rcv_skb),
 	HANDLE(unix_may_send),
 	HANDLE(inet_conn_established),

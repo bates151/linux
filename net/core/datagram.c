@@ -193,8 +193,10 @@ struct sk_buff *__skb_recv_datagram(struct sock *sk, unsigned flags,
 		}
 		spin_unlock_irqrestore(&sk->sk_receive_queue.lock, cpu_flags);
 
-		if (skb)
+		if (skb) {
+			security_socket_dgram_post_recv(sk, skb);
 			return skb;
+		}
 
 		/* User doesn't want to wait */
 		error = -EAGAIN;

@@ -1147,17 +1147,17 @@ int security_skb_shinfo_copy(struct sk_buff *skb,
 	return security_ops->skb_shinfo_copy(skb, shinfo, gfp);
 }
 
-int security_skbqueue_append_data(struct sock *sk, struct sk_buff *head)
+int security_socket_dgram_append(struct sock *sk, struct sk_buff *head)
 {
-	return security_ops->skbqueue_append_data(sk, head);
+	return security_ops->socket_dgram_append(sk, head);
 }
-EXPORT_SYMBOL(security_skbqueue_append_data);
+EXPORT_SYMBOL(security_socket_dgram_append);
 
-int security_udp_postrcv_skb(struct sock *sk, struct sk_buff *skb)
+void security_socket_dgram_post_recv(struct sock *sk, struct sk_buff *skb)
 {
-	return security_ops->udp_postrcv_skb(sk, skb);
+	security_ops->socket_dgram_post_recv(sk, skb);
 }
-EXPORT_SYMBOL(security_udp_postrcv_skb);
+EXPORT_SYMBOL(security_socket_dgram_post_recv);
 
 int security_socket_getpeersec_stream(struct socket *sock, char __user *optval,
 				      int __user *optlen, unsigned len)

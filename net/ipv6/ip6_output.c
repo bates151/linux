@@ -1332,7 +1332,7 @@ int ip6_append_data(struct sock *sk, int getfrag(void *from, char *to,
 		goto alloc_new_skb;
 
 	/* Queue is not empty, so check security now */
-	err = security_skbqueue_append_data(sk, skb_peek(&sk->sk_write_queue));
+	err = security_socket_dgram_append(sk, skb_peek(&sk->sk_write_queue));
 	if (err)
 		goto error;
 
@@ -1414,7 +1414,7 @@ alloc_new_skb:
 				goto error;
 			/* Check security using new skb if queue was empty */
 			if (!skb_prev) {
-				err = security_skbqueue_append_data(sk, skb);
+				err = security_socket_dgram_append(sk, skb);
 				if (err) {
 					kfree_skb(skb);
 					goto error;

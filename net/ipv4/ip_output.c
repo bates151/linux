@@ -856,7 +856,7 @@ static int __ip_append_data(struct sock *sk,
 		goto alloc_new_skb;
 
 	/* Queue is not empty, so check security now */
-	if ((err = security_skbqueue_append_data(sk, skb_peek(queue))))
+	if ((err = security_socket_dgram_append(sk, skb_peek(queue))))
 		goto error;
 
 	while (length > 0) {
@@ -926,7 +926,7 @@ alloc_new_skb:
 
 			/* Check security using new skb if queue was empty */
 			if (!skb_prev) {
-				err = security_skbqueue_append_data(sk, skb);
+				err = security_socket_dgram_append(sk, skb);
 				if (err) {
 					kfree_skb(skb);
 					goto error;

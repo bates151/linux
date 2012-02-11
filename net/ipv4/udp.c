@@ -1218,9 +1218,6 @@ try_again:
 	if (err)
 		goto out_free;
 
-	if ((err = security_udp_postrcv_skb(sk, skb)))
-		goto out_free;
-
 	if (!peeked)
 		UDP_INC_STATS_USER(sock_net(sk),
 				UDP_MIB_INDATAGRAMS, is_udplite);
