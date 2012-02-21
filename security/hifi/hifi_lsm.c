@@ -1238,7 +1238,7 @@ static int hifi_socket_sendmsg(struct socket *sock, struct msghdr *msg,
 				cmsg->cmsg_type == IP_RETOPTS) {
 			printk(KERN_WARNING "Hi-Fi: %s send with IP_RETOPTS\n",
 					current->comm);
-			return -EACCES;
+			return -EPERM;
 		}
 
 	switch (sock->sk->sk_family) {
@@ -1360,6 +1360,13 @@ static void hifi_inet_conn_established(struct sock *sk, struct sk_buff *skb)
 	/* Discard the ID we got from the listening socket */
 	sec->full_set = 0;
 }
+
+
+/******************************************************************************
+ *
+ * PERMISSION HOOKS
+ *
+ ******************************************************************************/
 
 /*
  * Feign ignorance to prevent options from being overwritten
@@ -1812,6 +1819,9 @@ static struct security_operations hifi_security_ops = {
 	HANDLE(socket_sock_rcv_skb),
 	HANDLE(unix_may_send),
 	HANDLE(inet_conn_established),
+
+	/* Permisison hooks */
+
 	HANDLE(socket_setsockopt),
 	HANDLE(socket_getsockopt),
 
