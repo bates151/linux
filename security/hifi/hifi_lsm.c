@@ -118,17 +118,21 @@ static void write_to_relay(const void *data, size_t length)
 /*
  * Implementation of relay behavior
  */
+static struct dentry *relay_dentry;
+
 static struct dentry *relay_create_file(const char *filename,
 		struct dentry *parent, int mode, struct rchan_buf *buf,
 		int *is_global)
 {
 	*is_global = 1;
-	return debugfs_create_file(filename, mode, parent, buf,
-			&relay_file_operations);
+	relay_dentry = dget(debugfs_create_file(filename, mode, parent, buf,
+			&relay_file_operations));
+	return relay_dentry;
 }
 
 static int relay_remove_file(struct dentry *dentry)
 {
+	dput(relay_dentry);
 	debugfs_remove(dentry);
 	return 0;
 }
@@ -775,6 +779,10 @@ static int hifi_inode_permission(struct inode *inode, int mask)
 
 	if (cursec->flags & CSEC_OPAQUE)
 		return 0;
+
+	/* Prevent processes other than the handler from messing with the log */
+	if (inode == relay_dentry->d_inode)
+		return -EPERM;
 
 	msg_initlen(&msg.msg, sizeof(msg));
 	msg.msg.type = PROVMSG_INODE_P;
