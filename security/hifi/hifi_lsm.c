@@ -788,7 +788,7 @@ static int hifi_inode_permission(struct inode *inode, int mask)
 		return 0;
 
 	/* Prevent processes other than the handler from messing with the log */
-	if (inode == relay_dentry->d_inode)
+	if (relay_dentry && inode == relay_dentry->d_inode)
 		return -EPERM;
 
 	msg_initlen(&msg.msg, sizeof(msg));
